@@ -1,0 +1,12 @@
+node_modules
+.npm-cache
+**/node_modules
+**/dist
+**/.next
+.git
+.env
+.env.*
+!.env.example
+apps/ios
+coverage
+**/*.log

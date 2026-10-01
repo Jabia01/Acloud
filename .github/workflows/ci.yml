@@ -1,0 +1,43 @@
+name: Foundation, account and discovery checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: backup_dev
+          POSTGRES_PASSWORD: local_dev_only_change_me
+          POSTGRES_DB: backup_dev
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: cp .env.example .env
+      - run: npm ci
+      - run: npm run build --workspace @backup/shared
+      - run: npm test
+      - run: npm run db:migrate
+      - run: npm run test:integration
+      - run: npm run build
+      - run: npm run security:scan
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+        working-directory: apps/ios/Packages/HealthClient
+      - run: swift test
+        working-directory: apps/ios/Packages/PhotoDiscovery
+      - run: brew install xcodegen
+      - run: xcodegen generate
+        working-directory: apps/ios
+      - run: xcodebuild -project BackupClient.xcodeproj -scheme BackupClient -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build
+        working-directory: apps/ios

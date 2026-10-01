@@ -1,0 +1,9 @@
+:root { font-family: system-ui, sans-serif; color-scheme: light dark; }
+body { margin: 0; }
+main { max-width: 42rem; margin: 4rem auto; padding: 0 1.5rem; line-height: 1.6; }
+a { color: light-dark(#174ca5, #a3c4ff); }
+label { display: block; margin: 1rem 0; }
+input { display: block; padding: .6rem; width: min(100%, 24rem); box-sizing: border-box; }
+small { display: block; }
+button { padding: .5rem .9rem; cursor: pointer; }
+li { margin: .7rem 0; }

@@ -1,0 +1,11 @@
+{
+  "name": "@backup/web", "version": "0.1.0", "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": { "@backup/shared": "0.1.0", "next": "^16.0.0", "react": "^19.2.0", "react-dom": "^19.2.0" },
+  "devDependencies": { "@types/node": "^24.0.0", "@types/react": "^19.2.0", "@types/react-dom": "^19.2.0" }
+}

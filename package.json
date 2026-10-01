@@ -1,0 +1,22 @@
+{
+  "name": "media-backup-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/api", "apps/web", "packages/shared"],
+  "engines": { "node": ">=24 <25", "npm": ">=11" },
+  "scripts": {
+    "dev:api": "npm run dev --workspace @backup/api",
+    "dev:web": "npm run dev --workspace @backup/web",
+    "build": "npm run build --workspace @backup/shared && npm run build --workspace @backup/api && npm run build --workspace @backup/web",
+    "test": "node --test scripts/test/*.test.mjs && npm run test --workspace @backup/shared && npm run test --workspace @backup/api && npm run test --workspace @backup/web",
+    "test:integration": "npm run test:integration --workspace @backup/api",
+    "test:auth:live": "node scripts/validate-auth-live.mjs --web",
+    "db:migrate": "node --env-file=.env scripts/migrate.mjs",
+    "services:up": "docker compose --env-file .env -f infrastructure/docker/compose.yml up -d db mail",
+    "services:down": "docker compose --env-file .env -f infrastructure/docker/compose.yml down",
+    "services:api": "docker compose --env-file .env -f infrastructure/docker/compose.yml --profile api up -d --build",
+    "services:logs": "docker compose --env-file .env -f infrastructure/docker/compose.yml logs -f",
+    "security:scan": "node scripts/security-scan.mjs"
+  },
+  "devDependencies": { "typescript": "~5.9.3", "tsx": "^4.20.6" }
+}

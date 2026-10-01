@@ -1,0 +1,55 @@
+# Generate with XcodeGen on macOS: xcodegen generate
+name: BackupClient
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  HealthClient:
+    path: Packages/HealthClient
+  PhotoDiscovery:
+    path: Packages/PhotoDiscovery
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    PRODUCT_NAME: BackupClient
+    PRODUCT_BUNDLE_IDENTIFIER: com.example.backupclient.dev
+    CODE_SIGN_STYLE: Automatic
+  configs:
+    Debug:
+      API_BASE_URL: http://localhost:3001
+      PRODUCT_DISPLAY_NAME: Acloud
+    Release:
+      API_BASE_URL: https://api.example.invalid
+      PRODUCT_DISPLAY_NAME: Acloud
+targets:
+  BackupClient:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    dependencies:
+      - package: HealthClient
+      - package: PhotoDiscovery
+        product: DiscoveryCore
+      - package: PhotoDiscovery
+        product: PhotoKitDiscovery
+    info:
+      path: Configuration/Info.plist
+      properties:
+        CFBundleDisplayName: $(PRODUCT_DISPLAY_NAME)
+        APIBaseURL: $(API_BASE_URL)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSLocalNetworkUsageDescription: Connect to the development backend on your local network.
+        NSPhotoLibraryUsageDescription: Discover counts and metadata of photos and videos you allow on this device. No media is uploaded or modified.
+        PHPhotoLibraryPreventAutomaticLimitedAccessAlert: true
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+schemes:
+  BackupClient:
+    build:
+      targets:
+        BackupClient: all
+    run:
+      config: Debug
