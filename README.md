@@ -1,8 +1,9 @@
-# Acloud — ACL-003 local photo-library discovery
+# Acloud — ACL-004 verified upload foundation
 
 Acloud is a privacy-focused cloud photo and video backup platform, initially
 targeting iPhone users in Nigeria. This repository contains **only the project
-and authentication foundation plus local iOS metadata discovery**, not a functioning backup service. Customer-data protection and
+and authentication foundation, local iOS metadata discovery and generated-file
+verified uploads**, not a customer-media backup service. Customer-data protection and
 prevention of data loss take priority over feature delivery.
 
 Intended architecture: iOS and web -> NestJS API -> PostgreSQL, private object
@@ -13,10 +14,12 @@ neutral media-backup terminology so branding can change independently.
 ```text
 apps/
   api/                    NestJS health/auth API, security tests and SQL migrations
+    src/uploads/          Scoped S3 authorization, quota and server verification
   web/                    Next.js status, account forms and cookie proxy
   ios/                    SwiftUI discovery/status/auth and XcodeGen project source
     Packages/HealthClient/  Networking, Keychain token storage and XCTest suite
     Packages/PhotoDiscovery/ Metadata scanner, protected SQLite, PhotoKit adapter and mock XCTest suite
+    Packages/UploadFoundation/ Generated-file queue, transport, state and native tests
 packages/shared/          TypeScript health contract and runtime validator
 infrastructure/docker/    Local Compose and API Dockerfile
 docs/                     Architecture, security, lifecycle and validation
@@ -25,11 +28,17 @@ AGENTS.md                 Repository-wide engineering safety rules
 .env.example              Local-only configuration template
 ```
 
-ACL-003 adds local photo/video discovery only. No media or discovery metadata is
+PhotoKit discovery remains local; no discovered media/metadata is automatically
 sent to the server. Sizes remain unknown in the default iOS 17 build; see
 [PhotoKit architecture](docs/PHOTO_LIBRARY_DISCOVERY.md),
 [pending native validation](docs/IOS_VALIDATION_PLAN.md) and
-[exact executed results](docs/VALIDATION.md). ACL-004 has not begun.
+[exact executed results](docs/VALIDATION.md).
+ACL-004 adds an explicit **≤5 MiB generated-file** direct upload path with
+server-side size/SHA-256 verification and version-pinned private download.
+UPLOADED does not mean PROTECTED. See [upload lifecycle](docs/UPLOAD_LIFECYCLE.md),
+[security/setup](docs/UPLOAD_SECURITY.md) and [review tree](docs/ACL004_TREE.md).
+Physical iPhone PhotoKit upload integration remains **UNVALIDATED**; customer-media
+beta requires that gate. ACL-005 has not begun.
 
 ## Prerequisites
 
@@ -47,6 +56,7 @@ From the repository root (Bash/macOS/Linux):
 cp .env.example .env
 npm ci
 npm run build --workspace @backup/shared
+npm run storage:configure
 npm run services:up
 npm run db:migrate
 ```
@@ -57,9 +67,15 @@ On Windows PowerShell:
 Copy-Item .env.example .env
 npm.cmd ci
 npm.cmd run build --workspace @backup/shared
+npm.cmd run storage:configure
 npm.cmd run services:up
 npm.cmd run db:migrate
 ```
+
+Storage setup generates separate random local root/application credentials in
+ignored .env. services:up also builds source-pinned development MinIO, creates a
+private versioned bucket and starts a persistent loopback-only storage API; first
+build can take several minutes. Do not delete volumes for routine shutdown.
 
 Use `npm.cmd` for all subsequent npm commands on Windows if PowerShell blocks
 npm.ps1. Wait for PostgreSQL to become healthy (`docker compose --env-file .env

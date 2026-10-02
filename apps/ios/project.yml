@@ -9,6 +9,8 @@ packages:
     path: Packages/HealthClient
   PhotoDiscovery:
     path: Packages/PhotoDiscovery
+  UploadFoundation:
+    path: Packages/UploadFoundation
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -33,6 +35,7 @@ targets:
         product: DiscoveryCore
       - package: PhotoDiscovery
         product: PhotoKitDiscovery
+      - package: UploadFoundation
     info:
       path: Configuration/Info.plist
       properties:

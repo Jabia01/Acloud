@@ -34,7 +34,7 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
     url.searchParams.set('options', `-c search_path=${schema}`);
     process.env.DATABASE_URL = url.href;
     const { migrate } = await import('../../../scripts/migrate.mjs');
-    assert.equal(await migrate(), 2);
+    assert.equal(await migrate(), 3);
     assert.equal(await migrate(), 0);
     pool = new Pool({ connectionString: url.href });
     const module = await Test.createTestingModule({ imports: [AppModule] }).overrideProvider(AccountMailer).useValue(mail).overrideGuard(AuthRateLimit).useValue(flowLimiter).compile();

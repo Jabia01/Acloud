@@ -1,8 +1,11 @@
 # ACL-003 native validation plan — pending macOS/iPhone
 
 Windows source review and Node/PostgreSQL regressions do not validate Swift,
-SQLite-on-iOS, PhotoKit permissions, UI or device behavior. **None of the native
-checks below has been executed in this task.** Use a dedicated test library/device
+SQLite-on-iOS, PhotoKit permissions, UI or device behavior. The user subsequently
+reported successful Mac app build, HealthClient 11/11, PhotoDiscovery 24/24 and
+simulator launch/discovery. Those reported prior results have not been independently
+reexecuted from this Windows task; the new ACL-004 native checks remain pending.
+Use a dedicated test library/device
 with synthetic media, not customer photos. Do not log identifiers or media data.
 
 ## Compile and automated tests
@@ -104,3 +107,45 @@ Photos discovery must not copy session tokens, require login or transmit assets.
 
 Record each executed check in VALIDATION.md with date, SDK/OS/device, command,
 result and evidence. Any unavailable/failed check stays explicitly pending.
+
+## ACL-004 generated upload native gate — pending
+
+Physical iPhone PhotoKit upload integration remains **UNVALIDATED**. The reported
+Mac/iPhone connection problem is still unresolved. No customer-media beta may
+rely on simulator or generated-file success as that gate.
+
+On the Mac, run the two existing native packages again and the new package:
+
+```sh
+cd apps/ios/Packages/UploadFoundation
+swift test
+cd ../..
+xcodegen generate
+xcodebuild -project BackupClient.xcodeproj -scheme BackupClient \
+  -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build
+```
+
+Run all 17 new UploadFoundation cases and existing 35 native cases, then the
+Debug/Release simulator/generic-device build matrix above. Native package
+compilation, concurrency diagnostics and tests are unexecuted on Windows; do
+not assume they pass. Add a development-only harness invoking the foundation
+against the Mac's built API/private MinIO using an explicitly generated sandbox
+file, the existing Keychain token store and an explicitly trusted storage origin.
+The production app has no new automatic upload or PhotoKit-original path.
+
+Check generated 3 B/4 KiB/512 KiB/5 MiB files and rejection above 5 MiB; incremental
+SHA-256; strict generated-directory bounds/symlinks/source mutation; QUEUED →
+UPLOADING → UPLOADED → VERIFYING → server PROTECTED; API bearer never sent to S3;
+expired/foreign-origin/redirected authorization rejected; real network interruption
+and cancellation; lost PUT/create response reconciliation; idempotent re-run after
+restart; no cancelled callback revives a record; protected state requires matching
+server asset ID and byte count; protected record cannot trigger deletion.
+
+Inspect private atomic queue JSON, backup exclusion and complete file protection;
+confirm no bearer, presigned URL, provider key or media content persists there.
+Test locked/background behavior and network/account 401 clearing through Keychain,
+not UserDefaults. Cancel/retry after a missing create response without sending
+bytes. Prove the existing discovery screen still never automatically enqueues
+Photos assets. Use Instruments for memory/task cancellation and a controlled
+network capture with synthetic data only. The ≤5 MiB whole-file retry design is
+not resumable large-video backup or background entire-library orchestration.

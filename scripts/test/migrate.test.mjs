@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { migrate } from '../migrate.mjs';
 
-const files = ['001_foundation.sql', '002_accounts.sql'];
+const files = (await readdir(new URL('../../apps/api/migrations/', import.meta.url))).filter(name => /^\d+_[a-z0-9_]+\.sql$/.test(name)).sort();
 const migrations = await Promise.all(files.map(async name => ({ name, sql: await readFile(new URL(`../../apps/api/migrations/${name}`, import.meta.url), 'utf8') })));
 const sql = migrations[0].sql;
 const checksum = createHash('sha256').update(sql).digest('hex');
@@ -27,7 +27,7 @@ function mockClient(existingChecksum, fails = false) {
 
 test('migration locks before applying SQL and commits its checksum atomically', async () => {
   const { Client, calls } = mockClient();
-  assert.equal(await migrate('test connection', Client), 2);
+  assert.equal(await migrate('test connection', Client), files.length);
   assert.ok(calls.indexOf('BEGIN') < calls.indexOf('SELECT pg_advisory_xact_lock(73491001)'));
   assert.ok(calls.indexOf('SELECT pg_advisory_xact_lock(73491001)') < calls.indexOf(sql));
   assert.deepEqual(calls.slice(-2), ['COMMIT', 'end']);

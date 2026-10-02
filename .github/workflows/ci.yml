@@ -1,4 +1,4 @@
-name: Foundation, account and discovery checks
+name: Foundation, account, discovery and verified upload checks
 on: [push, pull_request]
 permissions:
   contents: read
@@ -27,7 +27,12 @@ jobs:
       - run: npm run db:migrate
       - run: npm run test:integration
       - run: npm run build
+      - run: npm run storage:configure
+      - run: docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage storage-init
+      - run: npm run test:uploads
       - run: npm run security:scan
+      - run: docker compose --env-file .env -f infrastructure/docker/compose.yml stop storage storage-init
+        if: always()
   swift:
     runs-on: macos-latest
     steps:
@@ -36,6 +41,8 @@ jobs:
         working-directory: apps/ios/Packages/HealthClient
       - run: swift test
         working-directory: apps/ios/Packages/PhotoDiscovery
+      - run: swift test
+        working-directory: apps/ios/Packages/UploadFoundation
       - run: brew install xcodegen
       - run: xcodegen generate
         working-directory: apps/ios

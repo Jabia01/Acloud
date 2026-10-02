@@ -1,5 +1,114 @@
 # Foundation validation record
 
+## ACL-004: verified cloud upload foundation — generated files only
+
+Executed in C:/Acloud on Windows across 2026-10-01/02, Node.js v24.16.0 and
+npm 11.17.0 (versions rechecked). The authorized scope is
+the first generated-file direct upload, server verification and private download
+foundation. ACL-005 was not started. No payment/subscription, automatic PhotoKit
+upload/deletion, entire-library background backup or production provider was added.
+No commit or push occurred. **Physical iPhone PhotoKit upload integration remains
+UNVALIDATED** and is a gate before customer-media beta.
+
+The user reports prior native Mac success: app build, HealthClient 11/11,
+PhotoDiscovery 24/24, simulator launch/discovery. Those are **user-reported prior
+results**, not executions from this Windows task. The new UploadFoundation
+package/app linkage and its **17 authored tests have not compiled or executed
+here**. Xcode/Swift/XcodeGen remain unavailable in this workspace.
+
+### Commands and exact final results
+
+| Executed check | Actual result |
+| --- | --- |
+| Official S3 dependency installation | Added @aws-sdk/client-s3 and @aws-sdk/s3-request-presigner **3.1145.0**, 26 packages; npm installation audit: 498 packages, 0 vulnerabilities. Install warned about existing pending allow-scripts approvals; functioning tests/builds below did execute. |
+| `node scripts/setup-storage-env.mjs` | Exit 0; generated separate root/application local secrets in ignored .env, preserved existing configuration, printed no credentials. `git check-ignore .env` confirms exclusion. |
+| Compose `build storage` | Exit 0; built upstream MinIO RELEASE.2025-10-15T17-29-55Z security-fixed source and mc RELEASE.2025-08-13T08-35-41Z with Go 1.24.9/alpine. First source build took several minutes; no older pre-fix server image fallback. |
+| Compose `up -d --wait --wait-timeout 60 db mail storage storage-init` | Exit 0; PostgreSQL, Mailpit and storage healthy. Init success: private bucket, versioning and application-only policy configured; separate app credential used by API. |
+| `npm.cmd run db:migrate` | Exit 0; **1 applied**: additive 003_verified_uploads.sql. Existing 001/002 SQL not modified. |
+| Second migration run | Exit 0; **0 applied**. |
+| Final `npm.cmd test` | Exit 0; **31 passed, 0 failed**: migration mocks 3, shared 3, API Jest 20 across 6 suites, web 5. |
+| Final `npm.cmd run build` | Exit 0; shared/API TypeScript and Next.js production compile/typecheck/static generation passed. No new web upload page was added. |
+| `npm.cmd run test:integration` | Exit 0; **21 passed, 0 failed, 0 skipped**, including 20 account-security cases and foundation migration/HTTP health. Fresh schema applied all **3** migrations; repeat 0. |
+| Final `npm.cmd run test:uploads` | Exit 0; **32 passed, 0 failed, 0 skipped** against real PostgreSQL and private versioned MinIO, with explicitly controlled fault/timestamp/lease injections where noted below. Generated fixture versions removed by exact recorded key/version; only random fixture schema dropped. |
+| Built host API/web | Ran built node API on 3001 and built Next.js server on 3000; final API was restarted to load the new transfer-intent route before the last live client run. |
+| `npm.cmd run test:uploads:live -- --restart-storage` | Exit 0, executed twice (first before explicit start route, then final built lifecycle). Each created a **512 KiB generated file**; authorization/direct PUT/verification/PROTECTED/signed GET/checksum match passed. Storage restart preserved object/version and download digest. Synthetic objects/accounts intentionally retained; each issued login session revoked. |
+| `npm.cmd run test:auth:live` | Exit 0; live register/login/me, real local Mailpit verification/reset, token hashing/replay, session/device/logout revocation, six web pages and cookie/Origin protections passed. No credentials logged. |
+| `npm.cmd run uploads:abandoned` | Exit 0; **{"abandonedCounts":[]}** in application schema. Read-only aggregate inventory, no deletion/quota mutation. Dedicated fixture test separately proved expired sessions are identifiable. |
+| `npm.cmd run security:scan` | Exit 0; **123 Git-visible files**, **0 unexpected findings**, **4 reviewed local/test example lines**. Scanner remains heuristic; ignored .env and dependency lock contents are intentionally excluded from content inspection. |
+| Source/config static review | Native API bearer only on API requests; storage transport has no bearer/cookies/redirects and checks origin/signed headers. No PhotoKit import/traversal, UserDefaults token storage, media logging, automatic discovery enqueue or private media API added. Bounded source hashing/state queue. Native runtime behavior pending. |
+| `git diff --check` | Exit 0; Git LF→CRLF normalization warnings only. New shell script LF enforced with .gitattributes. Check does not replace review of untracked files. |
+| Final Compose status/init logs | PostgreSQL/Mailpit/storage **running healthy**; initializer exited after credential-free private/versioning/policy success. Volumes retained. |
+| Temporary process cleanup | Verified command lines/PIDs and stopped only this task's API/web Node servers. Docker services, volumes and the two live synthetic protected objects remain intact. |
+| Native tooling availability | `Get-Command swift,xcodebuild,xcodegen` found none. **0 new native tests/builds executed**; generated-file simulator/native upload harness still pending Mac validation. |
+
+Total final unique automated Node tests: **84 passed, 0 failed** (31 units +
+21 foundation/auth integration + 32 upload integration). Live HTTP/SMTP and
+standalone storage-restart assertions are additional, not included in this count.
+This is generated-file architecture/integration validation, not production
+iPhone upload or physical-device PhotoKit validation. Optional API Docker image,
+GitHub Actions and native upload tests were updated/scaffolded but not executed.
+
+### Full generated-file evidence
+
+The live client authenticated with a random .invalid local account, generated
+524,288 random bytes in memory, calculated SHA-256, created a reserved upload
+with a UUID idempotency key and confirmed a repeat returned the same session.
+The final run recorded explicit UPLOADING intent. It PUT directly to MinIO using
+short-lived required headers and confirmed the asset still was not PROTECTED.
+Completion verified server-side size/digest on an immutable version, produced
+PROTECTED and safe asset metadata, and a duplicate completion stayed safe.
+Anonymous GET returned **403**. Authorized version-scoped GET returned bytes
+whose digest matched the original. After a real storage-container restart with
+its named volume retained, another authorized GET still matched. No digest,
+signed URL, object key, token/password or personal media was printed.
+
+### Upload failure/security coverage actually executed
+
+| Category | Executed evidence |
+| --- | --- |
+| Invalid/absent/revoked auth | Upload creation/completion/start rejected; actual logout before mutation and during verification tested. |
+| Wrong tenant/device | Other user cannot inspect/start/complete/cancel/query/download; foreign device ownership and revoked-device checks reject. |
+| Short-lived scoped capabilities | Signed key/method/checksum/Content-Length alterations rejected; real **1-second** PUT and GET authorizations denied after **2.2 seconds** elapsed. Business configuration caps PUT at 300 seconds and GET at 60. |
+| Private storage | Real anonymous object GET denied; safe metadata contains only id/mediaType/status/sizeBytes; no secret/master password response. |
+| Client protection claim/missing object | Completion with status=PROTECTED body rejected; empty completion with no stored object returns FAILED/OBJECT_MISSING and null protected_at. |
+| Incorrect object size/checksum | Explicit server test credentials write generated wrong-size/same-size-corrupt fixtures; actual provider verification returns SIZE_MISMATCH/CHECKSUM_MISMATCH, never protects. Signed digest also rejects corrupt PUT bytes before object creation. |
+| Quota and concurrent race | In-flight reservations and existing protected bytes count; two simultaneous 100-byte uploads against 150-byte entitlement admit exactly one; protected/reserved move once. |
+| Idempotency | Concurrent duplicate create yields one asset/reservation; changed metadata under same key 409; concurrent/repeated complete yields one successful audit/quota move. |
+| Expired session/lease | Fixture-only SQL sets session/lease deadlines past; completion expires/reclaims safely, no repeated reservation release; crashed lease reclaimed. This does not claim waiting 300 seconds. |
+| Interruption | Real HTTP PUT aborts after 128/4096 bytes; completion reports missing object, then whole-file retry and real verification succeed. |
+| Verification retry/faults | Missing-object retry succeeds after bytes arrive; controlled provider exception is sanitized/audited then actual retry succeeds. Controlled false provider success/wrong size is rejected independently by service. |
+| Verification races | Real object verification result is deliberately gated: cancellation invalidates lease and prevents late protection; logout during verification rejects commit with 401; new login + fixture-expired lease recovers. |
+| Replay/overwrite | Replayed create-only PUT returns **412**; privileged generated overwrite creates another version, while download of the protected asset returns the original verified version/digest. |
+| Abandoned/cancelled objects | Expired generated sessions identified; cancellation idempotent and retains reservation until signed capability expiry. No blanket object/customer deletion or volume removal. |
+| Keys, metadata, oversized requests | Opaque UUID keys contain no email/filename; filename/status/key/unknown creation fields rejected; invalid/over-5-MiB metadata rejected before authorization. |
+
+Initial checks exposed two stale migration mocks that assumed exactly two files,
+and one upload assertion requiring 403 where MinIO returned 400 for an invalid
+signed request. Mocks now discover migrations; invalid requests may return either
+documented 400/403 denial. Final suites above passed. Review also repaired early
+cancellation reservation release and added independent provider-result checks;
+those final behaviors were exercised before completion.
+
+### Native foundation and remaining gates
+
+17 new XCTest cases are authored: SHA-256/exact size; empty/oversize/out-of-scope
+file rejection; queued metadata/no secret persistence; phase ordering; uploaded
+≠ protected; wrong-size protected response rejection; interruption/idempotent
+whole-file retry; repeated protected run; changed source; active cancellation;
+queued cancellation reconciliation; state reopening; queue bound/sticky cancel;
+foreign-origin authorization and insecure HTTP rejection; lost PUT response
+verification before replay. **All 17 are unexecuted here.** Existing 35 tests
+passed per user report before ACL-004, not rerun here.
+
+Remain pending: new Swift/Xcode build/tests, simulator generated-file harness,
+Keychain/cancellation/Data Protection/restart tests on native targets; physical
+Mac/iPhone connectivity and PhotoKit original integration. Single-part ≤5 MiB
+is not large-video multipart resume. No production worker/rate distribution,
+orphan cleanup/retention, storage disaster recovery or production provider audit
+is claimed. Details and explicit device beta gate are in
+[IOS_VALIDATION_PLAN.md](IOS_VALIDATION_PLAN.md), [UPLOAD_SECURITY.md](UPLOAD_SECURITY.md),
+[UPLOAD_LIFECYCLE.md](UPLOAD_LIFECYCLE.md) and [ACL004_TREE.md](ACL004_TREE.md).
+
 ## ACL-003M-A: limited-library picker compile repair
 
 User-reported native environment: Xcode 26.3, Swift 6.2.4, Intel Mac,

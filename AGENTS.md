@@ -1,6 +1,6 @@
 # Engineering rules
 
-Scope: the entire repository. ACL-003 local photo-library discovery is authorized by its specification; do not start ACL-004 without a specification.
+Scope: the entire repository. ACL-004 verified upload foundation is authorized by its specification; do not start ACL-005 without a specification.
 Use neutral internal domain names. Keep Acloud branding in configuration and display copy.
 
 1. Customer data protection and prevention of data loss take priority over feature velocity.
@@ -28,7 +28,10 @@ Use neutral internal domain names. Keep Acloud branding in configuration and dis
 
 Run applicable tests and builds. Record unavailable checks honestly. Never push without explicit user instruction.
 
-ACL-003: never upload media, modify/delete Photos assets, infer protection, or log
+PhotoKit discovery must never automatically upload media, modify/delete Photos assets, infer protection, or log
 local asset identifiers, filenames, paths, contents, thumbnails or EXIF. Use only
 public metadata APIs, respect limited access and keep discovery local. Library
 removal/access loss must never authorize deletion of a future server backup.
+ACL-004 validation uses only generated/simulator-safe files. UPLOADED is not
+PROTECTED; only server-side size and SHA-256 verification may grant protection.
+Physical iPhone PhotoKit upload integration remains UNVALIDATED.

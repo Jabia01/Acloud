@@ -7,5 +7,5 @@ import { AccountMailer, LocalAccountMailer } from './mail';
 import { AuthRateLimit } from './rate-limit';
 import { SessionGuard } from './session.guard';
 
-@Module({ controllers: [AuthController], providers: [DatabaseService, AuthService, PasswordService, AuthRateLimit, SessionGuard, { provide: AccountMailer, useClass: LocalAccountMailer }] })
+@Module({ controllers: [AuthController], providers: [DatabaseService, AuthService, PasswordService, AuthRateLimit, SessionGuard, { provide: AccountMailer, useClass: LocalAccountMailer }], exports: [SessionGuard, AuthService] })
 export class AuthModule {}
