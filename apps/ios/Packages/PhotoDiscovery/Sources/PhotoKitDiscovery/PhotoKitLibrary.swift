@@ -1,7 +1,6 @@
 #if os(iOS)
 import Foundation
 @preconcurrency import Photos
-import UIKit
 import DiscoveryCore
 
 private final class LibraryObserver: NSObject, PHPhotoLibraryChangeObserver, @unchecked Sendable {
@@ -111,10 +110,4 @@ public actor PhotoKitLibrary: PhotoLibraryProvider {
     deinit { if let observer { PHPhotoLibrary.shared().unregisterChangeObserver(observer) } }
 }
 
-@MainActor public enum PhotoLibraryAccessUI {
-    public static func manageLimitedAccess(from controller: UIViewController, completion: @escaping () -> Void) {
-        guard PHPhotoLibrary.authorizationStatus(for:.readWrite) == .limited else { completion(); return }
-        PHPhotoLibrary.shared().presentLimitedLibraryPicker(from:controller) { _ in completion() }
-    }
-}
 #endif

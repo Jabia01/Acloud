@@ -1,5 +1,58 @@
 # Foundation validation record
 
+## ACL-003M-A: limited-library picker compile repair
+
+User-reported native environment: Xcode 26.3, Swift 6.2.4, Intel Mac,
+macOS Sequoia 15.7.9. Reported diagnostic (approximate, not a captured build log):
+`Value of type 'PHPhotoLibrary' has no member 'presentLimitedLib...'` in
+PhotoKitLibrary.swift. The failing call was
+`PHPhotoLibrary.shared().presentLimitedLibraryPicker(from:controller) { _ in completion() }`.
+
+Source diagnosis: the file imported Photos and UIKit, but omitted **PhotosUI**,
+which exposes the limited-picker extension of PHPhotoLibrary. Apple's
+[limited-library sample](https://developer.apple.com/videos/play/wwdc2020/10641/)
+imports PhotosUI for this call. The
+[completion-handler overload](https://developer.apple.com/documentation/photos/phphotolibrary/presentlimitedlibrarypicker(from:completionhandler:))
+is available on iOS/iPadOS/Mac Catalyst 15+, verified against Apple's public
+documentation metadata. This is a missing framework import, not an Intel
+architecture or deployment-version workaround. Diagnosis matches inspected
+source and reported error; successful recompilation remains unverified here.
+
+Repair: moved the existing PhotoLibraryAccessUI public adapter to
+`Sources/PhotoKitDiscovery/PhotoLibraryAccessUI.swift`, guarded by
+`os(iOS) && canImport(UIKit) && canImport(PhotosUI)`. The adapter imports Photos,
+PhotosUI and UIKit; uses the explicit supported `completionHandler:` overload;
+has `@available(iOS 15.0, *)`; and delivers its Sendable completion on MainActor.
+The SwiftUI picker completion signature carries those same actor/Sendable
+requirements. Removed UIKit and presentation code from PhotoKitLibrary.swift;
+authorization/scanning/change observation/persistence are unchanged. No private
+API, selector, KVC, missing-feature stub or deployment relaxation was added.
+
+Verified configuration: app deployment iOS 17.0; package platforms iOS 17 and
+macOS 13. PhotoKitLibrary remains under `#if os(iOS)`; the UIKit adapter is
+excluded from native macOS package tests. Package source discovery automatically
+includes the new Swift file; no project.yml dependency change is needed.
+`PHPhotoLibraryPreventAutomaticLimitedAccessAlert: true` and the Photos usage
+description are already correctly set in project.yml. The generated app plist
+still needs verification after XcodeGen on the Mac.
+
+This repair was performed in the existing **Windows C:/Acloud workspace**, not
+on the user's Mac. `Get-Command swift,xcodebuild,xcodegen` found no native tools.
+Therefore Xcode project regeneration, all iOS target builds and all 35 native
+tests are **not executed** in this repair. No next native compile/test error was
+observed; absence of another error is not a successful build claim. Native
+commands and plist checks are in [IOS_VALIDATION_PLAN.md](IOS_VALIDATION_PLAN.md).
+Source/config inspection and final credential-scan results are recorded below.
+ACL-004 was not started; no commits/pushes occurred.
+
+| Repair check executed on Windows | Result |
+| --- | --- |
+| Source/config review | PhotosUI/Photos/UIKit imports present in the adapter; explicit iOS/UIKit/PhotosUI guard; iOS 15 availability; iOS 17 app/package target preserved; manual limited-picker alert suppression true. |
+| `npm.cmd run security:scan` | Exit 0; **99 Git-visible files**, **0 unexpected findings**, **4 reviewed local/test examples**. |
+| `git diff --check` | Exit 0; only Git LF→CRLF normalization warnings, no whitespace errors. |
+| XcodeGen / iOS Debug+Release simulator/device builds | **Not executed**; tools unavailable in this Windows workspace. |
+| DiscoveryCore / HealthClient native tests | **0 executed**; 24 + 11 authored tests await the Mac. |
+
 ## ACL-003: local iPhone photo-library discovery
 
 Executed on 2026-10-01 in C:/Acloud on Windows, Node.js v24.16.0 / npm 11.17.0.

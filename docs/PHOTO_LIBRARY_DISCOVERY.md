@@ -37,6 +37,8 @@ of the local-network permission used by the existing development API screens.
   `SQLiteDiscoveredAssetStore` actor, pure original-component size policy.
 - `PhotoKitDiscovery`: `PhotoKitLibrary` authorization/change actor and private
   `MetadataSnapshot` actor; no Photos imports in core.
+- `PhotoLibraryAccessUI`: iOS/UIKit-only PhotosUI picker adapter, explicit iOS 15
+  availability and main-actor completion delivery (ACL-003M-A compile repair).
 - `DiscoveryViewModel`: main-actor UI projection, one scan task, cancellation,
   pending re-scan coalescing, foreground refresh and access invalidation.
 - `DiscoveryView`: summary, permission explanations and scan controls.

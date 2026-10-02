@@ -7,6 +7,26 @@ with synthetic media, not customer photos. Do not log identifiers or media data.
 
 ## Compile and automated tests
 
+ACL-003M-A repaired the missing PhotosUI import for the limited-picker extension
+by moving presentation into PhotoLibraryAccessUI.swift. On the reported Intel
+Mac (Xcode 26.3 / Swift 6.2.4 / macOS 15.7.9), regenerate using the commands below
+and rebuild Debug and Release for simulator and generic iOS. Keep the optional
+iOS 27 size compilation flag OFF with this SDK. From apps/ios, additionally run:
+
+```sh
+xcodebuild -project BackupClient.xcodeproj -scheme BackupClient \
+  -destination 'generic/platform=iOS Simulator' -configuration Release CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project BackupClient.xcodeproj -scheme BackupClient \
+  -destination 'generic/platform=iOS' -configuration Debug CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project BackupClient.xcodeproj -scheme BackupClient \
+  -destination 'generic/platform=iOS' -configuration Release CODE_SIGNING_ALLOWED=NO build
+/usr/libexec/PlistBuddy -c 'Print :PHPhotoLibraryPreventAutomaticLimitedAccessAlert' Configuration/Info.plist
+```
+
+The plist value must be boolean true; also inspect the built application's
+Info.plist, not just the generated source. Record exact next compiler/test
+diagnostics if any. These commands have not executed in the Windows workspace.
+
 On a Mac with Xcode (iOS 17 SDK or newer), Command Line Tools and XcodeGen:
 
 ```sh

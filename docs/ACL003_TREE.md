@@ -25,6 +25,7 @@ apps/ios/
           SQLiteDiscoveredAssetStore.swift      Versioned schema 1, transactions and checkpoints
         PhotoKitDiscovery/
           PhotoKitLibrary.swift                PhotoKit permissions, snapshots, changes, size gate
+          PhotoLibraryAccessUI.swift           iOS/UIKit picker adapter importing PhotosUI
       Tests/DiscoveryCoreTests/
         DiscoveryTests.swift                   24 authored tests; unexecuted on Windows
 docs/

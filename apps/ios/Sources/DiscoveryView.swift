@@ -88,13 +88,13 @@ import PhotoKitDiscovery
 }
 
 private struct LimitedAccessPicker: UIViewControllerRepresentable {
-    let completed: () -> Void
+    let completed: @MainActor @Sendable () -> Void
     func makeUIViewController(context: Context) -> PickerController { PickerController(completed:completed) }
     func updateUIViewController(_ uiViewController: PickerController, context: Context) {}
     final class PickerController: UIViewController {
-        private let completed: () -> Void
+        private let completed: @MainActor @Sendable () -> Void
         private var presented = false
-        init(completed: @escaping () -> Void) { self.completed = completed; super.init(nibName:nil,bundle:nil) }
+        init(completed: @escaping @MainActor @Sendable () -> Void) { self.completed = completed; super.init(nibName:nil,bundle:nil) }
         required init?(coder: NSCoder) { fatalError("Unavailable") }
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
