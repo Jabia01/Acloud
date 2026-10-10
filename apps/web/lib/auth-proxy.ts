@@ -1,7 +1,12 @@
 export const SESSION_COOKIE = process.env.NODE_ENV === 'production' ? '__Host-backup_session' : 'backup_session';
 export function sameOrigin(request: Request, configuredOrigin = process.env.WEB_ORIGIN || 'http://localhost:3000'): boolean {
   // Fixed allowlisted origin; do not trust Host/X-Forwarded-Host as policy input.
-  return request.headers.get('origin') === new URL(configuredOrigin).origin;
+  const origin = request.headers.get('origin');
+  if (origin === new URL(configuredOrigin).origin) return true;
+  if (process.env.NODE_ENV !== 'development' || !origin) return false;
+  return (process.env.DEV_WEB_ORIGINS || '').split(',').filter(Boolean).some(value => {
+    try { return origin === new URL(value.trim()).origin; } catch { return false; }
+  });
 }
 export function publicLogin(value: unknown): { sessionToken: string; expiresAt: string; body: Record<string, unknown> } | null {
   if (typeof value !== 'object' || value === null) return null;

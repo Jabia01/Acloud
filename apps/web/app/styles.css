@@ -7,3 +7,26 @@ input { display: block; padding: .6rem; width: min(100%, 24rem); box-sizing: bor
 small { display: block; }
 button { padding: .5rem .9rem; cursor: pointer; }
 li { margin: .7rem 0; }
+:root { color-scheme: light; color:#172b36; background:#f5f7f8; }
+.site-header { display:flex; flex-wrap:wrap; align-items:center; gap:1.5rem; padding:1.2rem max(1.5rem,calc((100vw - 72rem)/2)); background:white; border-bottom:1px solid #dce3e7; }
+.brand { font-size:1.6rem; font-weight:700; text-decoration:none; }
+.site-header nav { display:flex; flex-wrap:wrap; gap:1rem; }
+.control { max-width:72rem; margin:2rem auto; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem; }
+.cards article,.asset-grid li,.confirmation { background:white; border:1px solid #dce3e7; border-radius:.7rem; padding:1.2rem; }
+.cards h2 { font-size:1rem; margin-top:0; }
+.asset-grid { list-style:none; padding:0; display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem; }
+.asset-grid li { margin:0; overflow-wrap:anywhere; }
+.media-label,.muted { color:#425866; }
+.asset-grid h3 { font-size:1.05rem; }
+progress { max-width:100%; width:100%; accent-color:#245a75; }
+button { background:#174c68; color:white; border:1px solid #174c68; border-radius:.3rem; margin:.3rem; }
+button:disabled { opacity:.55; cursor:default; }
+:focus-visible { outline:3px solid #d57c12; outline-offset:3px; }
+.selection { display:flex; gap:.7rem; align-items:center; }
+.selection input { width:auto; }
+.skip { position:absolute; left:1rem; top:-5rem; background:white; padding:.5rem; z-index:10; }
+.skip:focus { top:1rem; }
+dt { font-weight:600; } dd { margin:0 0 1rem; }
+@media(max-width:500px) { .control { padding:0 1rem; } .site-header { padding:1rem; } .cards,.asset-grid { grid-template-columns:1fr; } }
+.table-scroll { overflow:auto; max-width:100%; } table { border-collapse:collapse; width:100%; } th,td { text-align:left; padding:.6rem; border-bottom:1px solid #cbd5db; vertical-align:top; overflow-wrap:anywhere; } select { padding:.6rem; max-width:100%; } .confirmation { margin:1rem 0; }
