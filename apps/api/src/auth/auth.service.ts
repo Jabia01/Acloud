@@ -1,3 +1,5 @@
+import {betaConfiguration} from '../beta/config';
+import {limitSetting} from '../hardening/config';
 import { BadRequestException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
@@ -26,7 +28,7 @@ export class AuthService {
   private async lockUser(client: PoolClient, userId: string) {
     const result = await client.query('SELECT * FROM users WHERE id=$1 FOR UPDATE', [userId]);
     const user = result.rows[0];
-    if (!user || user.status !== 'ACTIVE') throw new UnauthorizedException('Authentication required');
+    if (!user || user.status !== 'ACTIVE' || user.privacy_state !== 'ACTIVE') throw new UnauthorizedException('Authentication required');
     return user;
   }
   private async deliver(to: string, kind: 'verify' | 'reset', raw: string) {
@@ -36,6 +38,7 @@ export class AuthService {
   }
   async register(display: string, normalized: string, password: string) {
     // Hash even for duplicate attempts to reduce the obvious fast-path oracle.
+    if(process.env.NODE_ENV==='production'||betaConfiguration().enabled)throw new UnauthorizedException('Customer onboarding awaits private beta approval');
     const hash = await this.passwords.hash(password);
     const raw = issue();
     const created = await this.db.transaction(async client => {
@@ -48,8 +51,11 @@ export class AuthService {
     return GENERIC_ACCOUNT_MESSAGE;
   }
   private async upsertDevice(client: PoolClient, userId: string, input: DeviceInput) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,101002))',[input.identifier]);
     const existing = await client.query('SELECT id,revoked_at FROM devices WHERE user_id=$1 AND device_identifier=$2 FOR UPDATE', [userId, input.identifier]);
     if (existing.rows[0]?.revoked_at) throw new BadRequestException('Device registration unavailable');
+    if(!existing.rowCount&&Number((await client.query('SELECT count(*) n FROM devices WHERE user_id=$1 AND revoked_at IS NULL',[userId])).rows[0].n)>=(betaConfiguration().enabled?betaConfiguration().maxDevices:limitSetting('MAX_ACCOUNT_DEVICES',20,1000)))throw new BadRequestException('Device limit reached');
+    if(!existing.rowCount&&Number((await client.query('SELECT count(DISTINCT user_id) n FROM devices WHERE device_identifier=$1 AND revoked_at IS NULL',[input.identifier])).rows[0].n)>=limitSetting('MAX_DEVICE_ACCOUNTS',5,100))throw new BadRequestException('Device relationship requires review');
     const result = await client.query(`INSERT INTO devices (id,user_id,device_identifier,display_name,platform,app_version,os_version)
       VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (user_id,device_identifier) DO UPDATE SET display_name=EXCLUDED.display_name,platform=EXCLUDED.platform,app_version=EXCLUDED.app_version,os_version=EXCLUDED.os_version,last_seen_at=now() RETURNING id`, [randomUUID(), userId, input.identifier, input.displayName, input.platform, input.appVersion, input.osVersion]);
     return result.rows[0].id as string;
@@ -58,14 +64,15 @@ export class AuthService {
     const found = await this.db.query('SELECT * FROM users WHERE email_normalized=$1', [normalized]);
     const candidate = found.rows[0];
     const valid = await this.passwords.verify(candidate?.password_hash, password);
-    if (!valid || !candidate || candidate.status !== 'ACTIVE') throw new UnauthorizedException(INVALID);
+    if (!valid || !candidate || candidate.status !== 'ACTIVE') { await this.db.query("INSERT INTO operational_security_events(id,code) VALUES($1,'CUSTOMER_LOGIN_FAILED')",[randomUUID()]); throw new UnauthorizedException(INVALID); }
     const raw = issue();
     return this.db.transaction(async client => {
       const locked = await client.query('SELECT * FROM users WHERE id=$1 FOR UPDATE', [candidate.id]);
       const user = locked.rows[0];
-      if (!user || user.status !== 'ACTIVE') throw new UnauthorizedException(INVALID);
+      if (!user || user.status !== 'ACTIVE' || user.privacy_state !== 'ACTIVE') throw new UnauthorizedException(INVALID);
       // Reset might have changed the password while expensive verification ran.
       if (user.password_hash !== candidate.password_hash) throw new UnauthorizedException(INVALID);
+      if(Number((await client.query('SELECT count(*) n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[user.id])).rows[0].n)>=limitSetting('MAX_ACTIVE_SESSIONS',10,1000))throw new UnauthorizedException(INVALID);
       let deviceId: string | null = null;
       if (device) {
         try { deviceId = await this.upsertDevice(client, user.id, device); }

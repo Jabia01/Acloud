@@ -1,0 +1,27 @@
+import {BadRequestException} from '@nestjs/common';
+import {uuid} from '../auth/input';
+import {setting} from '../uploads/input';
+export const maxResources=()=>setting('MEDIA_MANIFEST_MAX_RESOURCES',16,16);
+export const roles=['PRIMARY_STILL','PRIMARY_VIDEO','PAIRED_VIDEO','RAW_ORIGINAL','JPEG_COMPANION','EDITED_RENDER','ADJUSTMENT_DATA','ADJUSTMENT_BASE','DEPTH_DATA','AUXILIARY','UNKNOWN_REQUIRED','UNKNOWN_OPTIONAL','DERIVED_PREVIEW'] as const;
+export type ResourceRole=typeof roles[number];
+export function object(value:unknown,keys:string[]):Record<string,any>{if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!keys.includes(k)))throw new BadRequestException('Invalid manifest metadata');return value as any;}
+export function hash(value:unknown){if(typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value))throw new BadRequestException('Invalid source evidence');return value;}
+export function capture(value:unknown){const b=object(value,['sourceFingerprint','expectedSize','expectedSha256']);if(!Number.isSafeInteger(b.expectedSize)||b.expectedSize<1||b.expectedSize>10*1024**3)throw new BadRequestException('Invalid resource size');return{sourceFingerprint:hash(b.sourceFingerprint),expectedSize:b.expectedSize,expectedSha256:hash(b.expectedSha256)};}
+export function resource(value:unknown,ordinal:number){const b=object(value,['id','role','resourceType','uti']);if(!roles.includes(b.role)||!Number.isInteger(b.resourceType)||b.resourceType<1||b.resourceType>65535||typeof b.uti!=='string'||!/^[-a-zA-Z0-9.]{1,128}$/.test(b.uti))throw new BadRequestException('Invalid resource type');
+ const type=b.resourceType,raw=/raw|dng/i.test(b.uti);let allowed:string[];
+ if(type===1)allowed=raw?['RAW_ORIGINAL']:['PRIMARY_STILL','JPEG_COMPANION'];else if(type===2)allowed=['PRIMARY_VIDEO'];else if(type===4)allowed=raw?['RAW_ORIGINAL']:['JPEG_COMPANION'];else if([5,6,10].includes(type))allowed=['EDITED_RENDER'];else if(type===7)allowed=['ADJUSTMENT_DATA'];else if([8,11,12].includes(type))allowed=['ADJUSTMENT_BASE'];else if(type===9)allowed=['PAIRED_VIDEO'];else if(type===19)allowed=['DERIVED_PREVIEW'];else allowed=['UNKNOWN_REQUIRED'];
+ if(!allowed.includes(b.role))throw new BadRequestException('Resource role mismatch');
+ return{id:uuid(b.id),ordinal,role:b.role as ResourceRole,resourceType:type,uti:b.uti,required:type!==19,class:type===19?'DERIVED':['PRIMARY_STILL','PRIMARY_VIDEO','RAW_ORIGINAL','JPEG_COMPANION','PAIRED_VIDEO'].includes(b.role)?'ORIGINAL':['EDITED_RENDER'].includes(b.role)?'EDITED':b.role==='UNKNOWN_REQUIRED'?'UNKNOWN':'AUXILIARY'};
+}
+export function manifestInput(value:unknown){const b=object(value,['id','deviceId','libraryId','sourceToken','sourceFingerprint','manifestVersion','mediaType','kind','policy','creationTime','modificationTime','pixelWidth','pixelHeight','durationSeconds','resources']);if(b.manifestVersion!==1||!['image','video'].includes(b.mediaType)||!['ORDINARY','LIVE_PHOTO','RAW','RAW_JPEG','EDITED','COMPLEX'].includes(b.kind)||b.policy!=='PRESERVE_ALL_AVAILABLE'||!Array.isArray(b.resources)||b.resources.length<1||b.resources.length>maxResources())throw new BadRequestException('Unsupported manifest');
+ for(const key of ['pixelWidth','pixelHeight'])if(!Number.isInteger(b[key])||b[key]<1||b[key]>100000)throw new BadRequestException('Invalid dimensions');
+ const date=(v:unknown)=>{if(v===null)return null;if(typeof v!=='string'||v.length>40||!Number.isFinite(Date.parse(v)))throw new BadRequestException('Invalid source date');return new Date(v).toISOString();};
+ if(b.durationSeconds!==null&&(!Number.isFinite(b.durationSeconds)||b.durationSeconds<0||b.durationSeconds>=864000))throw new BadRequestException('Invalid duration');
+ const items=b.resources.map(resource);if(new Set(items.map((r:any)=>r.id)).size!==items.length)throw new BadRequestException('Duplicate resource');const has=(r:string)=>items.some((x:any)=>x.role===r),count=(r:string)=>items.filter((x:any)=>x.role===r).length;
+ if(['LIVE_PHOTO','RAW','RAW_JPEG'].includes(b.kind)&&b.mediaType!=='image'||b.mediaType==='image'&&has('PRIMARY_VIDEO')||b.mediaType==='video'&&has('PRIMARY_STILL'))throw new BadRequestException('Media type mismatch');
+ if(b.kind==='LIVE_PHOTO'&&(!has('PRIMARY_STILL')||!has('PAIRED_VIDEO')||count('PRIMARY_STILL')!==1||count('PAIRED_VIDEO')!==1))throw new BadRequestException('Live Photo pair required');
+ if(b.kind==='RAW'&&!has('RAW_ORIGINAL')||b.kind==='RAW_JPEG'&&(!has('RAW_ORIGINAL')||!has('JPEG_COMPANION')))throw new BadRequestException('RAW resource set required');
+ if(b.kind==='ORDINARY'&&(items.filter((r:any)=>r.required).length!==1||!items.some((r:any)=>['PRIMARY_STILL','PRIMARY_VIDEO'].includes(r.role))))throw new BadRequestException('Ordinary resource mismatch');
+ if(b.kind==='EDITED'&&(!has('EDITED_RENDER')||!has('ADJUSTMENT_DATA')||!items.some((r:any)=>r.class==='ORIGINAL')))throw new BadRequestException('Edit fidelity resources required');
+ return{id:uuid(b.id),deviceId:uuid(b.deviceId),libraryId:uuid(b.libraryId),sourceToken:uuid(b.sourceToken),sourceFingerprint:hash(b.sourceFingerprint),manifestVersion:1,mediaType:b.mediaType,kind:b.kind,policy:b.policy,creationTime:date(b.creationTime),modificationTime:date(b.modificationTime),pixelWidth:b.pixelWidth,pixelHeight:b.pixelHeight,durationSeconds:b.durationSeconds,resources:items,reviewRequired:b.kind==='COMPLEX'||items.some((r:any)=>r.class==='UNKNOWN')||!items.some((r:any)=>r.class==='ORIGINAL')};
+}

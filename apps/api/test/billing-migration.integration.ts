@@ -1,0 +1,11 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {readFile,readdir} from 'node:fs/promises';
+import {Pool} from 'pg';
+import {EntitlementService} from '../src/billing/entitlement';
+test('billing migration preserves legacy protected/reserved usage and explicit manual quota',async()=>{
+ const original=process.env.DATABASE_URL!,schema=`billing_migration_${randomUUID().replaceAll('-','')}`;assert.ok(['localhost','127.0.0.1'].includes(new URL(original).hostname));const root=new Pool({connectionString:original});await root.query(`CREATE SCHEMA ${schema}`);const u=new URL(original);u.searchParams.set('options',`-c search_path=${schema}`);const pool=new Pool({connectionString:u.href});
+ try{const directory=new URL('../migrations/',import.meta.url),files=(await readdir(directory)).filter(f=>/^00[1-6]_/.test(f)).sort();for(const f of files)await pool.query(await readFile(new URL(f,directory),'utf8'));const id=randomUUID();await pool.query("INSERT INTO users(id,email,email_normalized,password_hash) VALUES($1,$2,$2,'generated-unused')",[id,`${id}@example.invalid`]);await pool.query('INSERT INTO development_entitlements(user_id,quota_bytes,protected_bytes,reserved_bytes) VALUES($1,1234,100,10)',[id]);await pool.query(await readFile(new URL('007_billing.sql',directory),'utf8'));const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[id]);const e=await EntitlementService.lock(c,id);assert.equal(e.planCode,'FREE_5');assert.equal(e.source,'MANUAL_ADMIN');assert.equal(e.quotaBytes,1234);assert.equal(e.protectedBytes,100);assert.equal(e.reservedBytes,10);await c.query('COMMIT');}finally{c.release();}assert.equal((await pool.query('SELECT reason FROM manual_entitlements WHERE user_id=$1',[id])).rows[0].reason,'LEGACY_DEVELOPMENT_QUOTA');const next=randomUUID();await pool.query("INSERT INTO users(id,email,email_normalized,password_hash) VALUES($1,$2,$2,'generated-unused')",[next,`${next}@example.invalid`]);assert.equal((await pool.query('SELECT quota_bytes FROM entitlements WHERE user_id=$1',[next])).rows[0].quota_bytes,'5000000000');}
+ finally{await pool.end();await root.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);await root.end();}
+});

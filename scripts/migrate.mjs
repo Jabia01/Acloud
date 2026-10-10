@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
+import {readFileSync} from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 export async function migrate(connectionString = process.env.DATABASE_URL, Client = pg.Client) {
   if (!connectionString) throw new Error('DATABASE_URL is required');
-  const client = new Client({ connectionString, connectionTimeoutMillis: 3000, statement_timeout: 10000 });
+  let ssl;if(process.env.DATABASE_CA_FILE){const u=new URL(connectionString);if(u.searchParams.get('sslmode')!=='verify-full')throw new Error('Verified migration TLS required');u.searchParams.delete('sslmode');connectionString=u.href;ssl={rejectUnauthorized:true,ca:readFileSync(process.env.DATABASE_CA_FILE,'utf8')};}
+  const client = new Client({ connectionString,...(ssl?{ssl}:{}), connectionTimeoutMillis: 3000, statement_timeout: 10000 });
   try {
     await client.connect();
     await client.query('BEGIN');

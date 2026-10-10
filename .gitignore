@@ -24,3 +24,5 @@ xcuserdata/
 .swiftpm/
 apps/ios/BackupClient.xcodeproj/
 apps/ios/Configuration/Info.plist
+*.tombstone
+*.inventory/

@@ -1,20 +1,23 @@
-import { CanActivate, ExecutionContext, HttpException, Injectable } from '@nestjs/common';
-import { createHash } from 'node:crypto';
+import { CanActivate, ExecutionContext, HttpException, Inject, Injectable, Optional } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
+import {DatabaseService} from '../database.service';
 import type { Request } from 'express';
 
 @Injectable()
 export class AuthRateLimit implements CanActivate {
+  constructor(@Optional() @Inject(DatabaseService) private readonly db?:DatabaseService) {}
+  private blocked(){void this.db?.query("INSERT INTO operational_security_events(id,code) VALUES($1,'CUSTOMER_RATE_LIMIT')",[randomUUID()]).catch(()=>{});throw new HttpException('Too many requests',429);}
   private readonly buckets = new Map<string, { count: number; end: number }>();
   private consume(key: string, limit: number, now: number) {
     let bucket = this.buckets.get(key);
     if (!bucket || bucket.end <= now) {
       if (this.buckets.size >= 10000) {
         for (const [entry, value] of this.buckets) if (value.end <= now) this.buckets.delete(entry);
-        if (this.buckets.size >= 10000) throw new HttpException('Too many requests', 429);
+        if (this.buckets.size >= 10000) this.blocked();
       }
       bucket = { count: 0, end: now + 10 * 60 * 1000 }; this.buckets.set(key, bucket);
     }
-    if (++bucket.count > limit) throw new HttpException('Too many requests', 429);
+    if (++bucket.count > limit) this.blocked();
   }
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<Request>();

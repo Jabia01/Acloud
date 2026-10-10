@@ -1,0 +1,20 @@
+-- Additive private-beta control plane. No protected objects or prior migrations change.
+CREATE TABLE beta_environment(id uuid PRIMARY KEY,resource_hash char(64) NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX beta_single_environment ON beta_environment((true));
+CREATE TABLE beta_acceptance(environment_id uuid NOT NULL REFERENCES beta_environment(id),release_id uuid NOT NULL,gate text NOT NULL,status text NOT NULL CHECK(status IN('PASS','PENDING','BLOCKED')),evidence_id uuid NOT NULL,approved_by uuid NOT NULL REFERENCES internal_admins(id),approved_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(environment_id,release_id,gate));
+CREATE TABLE beta_invites(id uuid PRIMARY KEY,email_normalized text NOT NULL,token_hash char(64) UNIQUE NOT NULL,status text NOT NULL DEFAULT 'PENDING' CHECK(status IN('PENDING','REDEEMED','REVOKED')),created_by uuid NOT NULL REFERENCES internal_admins(id),expires_at timestamptz NOT NULL,redeemed_at timestamptz,created_at timestamptz NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX beta_invite_pending_email ON beta_invites(email_normalized) WHERE status='PENDING';
+ALTER TABLE users ADD COLUMN beta_state text NOT NULL DEFAULT 'NOT_INVITED' CHECK(beta_state IN('NOT_INVITED','INVITED','ACTIVE_BETA','SUSPENDED_BETA','EXITED_BETA'));
+ALTER TABLE users ADD COLUMN beta_invite_id uuid REFERENCES beta_invites(id);
+ALTER TABLE users ADD COLUMN beta_terms_version uuid;
+ALTER TABLE users ADD COLUMN beta_privacy_version uuid;
+ALTER TABLE users ADD COLUMN beta_acknowledged_at timestamptz;
+CREATE INDEX beta_accounts_state ON users(beta_state,id);
+CREATE TABLE beta_switches(name text PRIMARY KEY,blocked boolean NOT NULL DEFAULT false,updated_by uuid REFERENCES internal_admins(id),updated_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO beta_switches(name) VALUES('registration'),('activation'),('uploads'),('multipart'),('downloads'),('checkout'),('admin_mutation'),('free_up_space'),('account_deletion'),('privacy_export'),('worker_upload'),('worker_billing'),('worker_privacy'),('worker_email'),('worker_operations');
+CREATE TABLE beta_daily_uploads(user_id uuid NOT NULL REFERENCES users(id),day date NOT NULL,bytes bigint NOT NULL CHECK(bytes>=0),PRIMARY KEY(user_id,day));
+CREATE TABLE beta_feedback(id uuid PRIMARY KEY,user_id uuid NOT NULL REFERENCES users(id),category text NOT NULL CHECK(category IN('BACKUP','RESTORE','ACCOUNT','OTHER')),message text NOT NULL CHECK(length(message)<=2000),app_version text,created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX beta_feedback_owner ON beta_feedback(user_id,created_at DESC);
+CREATE TABLE beta_worker_heartbeat(worker_id uuid PRIMARY KEY,last_seen_at timestamptz NOT NULL,state text NOT NULL CHECK(state IN('RUNNING','STOPPED')));
+CREATE TABLE beta_error_outbox(id uuid PRIMARY KEY,code text NOT NULL,service text NOT NULL,correlation_id uuid,created_at timestamptz NOT NULL DEFAULT now(),delivered_at timestamptz,attempts integer NOT NULL DEFAULT 0);
+CREATE INDEX beta_error_pending ON beta_error_outbox(created_at,id) WHERE delivered_at IS NULL;

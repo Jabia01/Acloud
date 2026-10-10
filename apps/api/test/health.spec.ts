@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
+import {ObjectStorageProvider} from '../src/uploads/storage';
 import { DatabaseService } from '../src/database.service';
 
 describe('GET /health', () => {
@@ -10,7 +11,7 @@ describe('GET /health', () => {
   const database = { isReachable: jest.fn() };
   beforeAll(async () => {
     const module = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(DatabaseService).useValue(database).compile();
+      .overrideProvider(DatabaseService).useValue(database).overrideProvider(ObjectStorageProvider).useValue({isHealthy:async()=>false}).compile();
     app = module.createNestApplication();
     await app.init();
   });

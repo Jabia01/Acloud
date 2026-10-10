@@ -2,18 +2,21 @@ import 'reflect-metadata';
 import { after,before,beforeEach,describe,test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash,randomBytes,randomUUID } from 'node:crypto';
-import { request as httpRequest } from 'node:http';
+import { request as httpRequest, globalAgent } from 'node:http';
 import { Pool } from 'pg';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { GetBucketVersioningCommand,PutObjectCommand,S3Client } from '@aws-sdk/client-s3';
+import {AdminService} from '../src/admin/service';
 import { AppModule } from '../src/app.module';
 import { AccountMailer,MemoryAccountMailer } from '../src/auth/mail';
 import { AuthRateLimit } from '../src/auth/rate-limit';
 import { SafeErrors } from '../src/auth/safe-errors';
 import { ObjectStorageProvider,S3ObjectStorageProvider } from '../src/uploads/storage';
 
+// Supertest repeatedly opens/closes ephemeral listeners; avoid reusing their pooled sockets.
+globalAgent.keepAlive=false;
 describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:false},() => {
   let app: INestApplication,pool: Pool,admin: Pool,s3: S3Client,storage: S3ObjectStorageProvider;
   const originalURL=process.env.DATABASE_URL!,schema=`upload_test_${randomUUID().replaceAll('-','')}`;
@@ -50,11 +53,13 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
     return {upload,data};
   };
   before(async () => {
+    assert.notEqual(process.env.NODE_ENV,'production');
+    assert.equal(process.env.STORAGE_PROVIDER??'minio','minio');
     assert.ok(['127.0.0.1','localhost'].includes(new URL(originalURL).hostname));
     assert.ok(['127.0.0.1','localhost'].includes(new URL(process.env.S3_ENDPOINT!).hostname));
     admin=new Pool({connectionString:originalURL}); await admin.query(`CREATE SCHEMA ${schema}`);
     const url=new URL(originalURL); url.searchParams.set('options',`-c search_path=${schema}`); process.env.DATABASE_URL=url.href;
-    const {migrate}=await import('../../../scripts/migrate.mjs'); assert.equal(await migrate(),3); assert.equal(await migrate(),0);
+    const {migrate}=await import('../../../scripts/migrate.mjs'); assert.equal(await migrate(),15); assert.equal(await migrate(),0);
     pool=new Pool({connectionString:url.href});
     const module=await Test.createTestingModule({imports:[AppModule]}).overrideProvider(AccountMailer).useValue(new MemoryAccountMailer()).overrideGuard(AuthRateLimit).useValue({canActivate:()=>true}).compile();
     app=module.createNestApplication(); app.useGlobalFilters(new SafeErrors()); await app.init();
@@ -70,9 +75,56 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
   after(async () => {
     // Explicitly remove only the generated fixture versions, never arbitrary bucket contents.
     for (const object of objects) await storage.deleteObject(object.key,object.versionId);
+    if(pool && storage){
+      const incomplete=await pool.query("SELECT a.storage_object_key,u.multipart_upload_id FROM upload_sessions u JOIN assets a ON a.id=u.asset_id WHERE u.multipart_upload_id IS NOT NULL AND u.completed_version_id IS NULL");
+      for(const r of incomplete.rows)try{await storage.abortMultipart(r.storage_object_key,r.multipart_upload_id);}catch{/* Generated fixture already completed/aborted. */}
+    }
     s3?.destroy(); await app?.close(); await pool?.end();
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     process.env.DATABASE_URL=originalURL;
+  });
+  test('cleanup proof verifies real private versions without deleting cloud backup or quota',async()=>{
+    const priorFlag=process.env.ENABLE_FREE_UP_SPACE,priorContext=process.env.DISPOSABLE_CLEANUP_CONTEXT;
+    process.env.ENABLE_FREE_UP_SPACE='true';process.env.DISPOSABLE_CLEANUP_CONTEXT='true';
+    try{
+      await pool.query("UPDATE devices SET platform='ios' WHERE id=$1",[deviceId]);
+      const libraryId=randomUUID(),data=randomBytes(257),upload=(await post('/uploads',{...body(data),device_id:deviceId,library_id:libraryId}).set('Idempotency-Key',randomUUID()).expect(200)).body;
+      assert.ok((await put(upload,data)).ok);await post(`/uploads/${upload.id}/complete`).expect(200);
+      const a=await row(upload.id),ledger=async()=>(await pool.query('SELECT protected_bytes,reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0],before=await ledger();
+      assert.equal(a.source_library_id,libraryId);
+      const proof=(await post('/storage/free-up-space/prepare',{assetIds:[a.id],libraryId}).expect(200)).body;
+      const receipt=(await post('/storage/free-up-space/consume',{token:proof.token}).expect(200)).body;assert.equal(receipt.approved,true);
+      await post('/storage/free-up-space/consume',{token:proof.token}).expect(409);
+      await post('/storage/free-up-space/confirm-result',{proofId:proof.proofId,result:'REMOVED'}).expect(200); // Synthetic client report only; no PhotoKit operation.
+      assert.deepEqual(await ledger(),before);assert.equal((await row(upload.id)).status,'PROTECTED');
+      const grant=(await post(`/assets/${a.id}/download`).expect(200)).body,download=await fetch(grant.url);assert.equal(download.status,200);assert.equal(digest(new Uint8Array(await download.arrayBuffer())),digest(data));
+      // Remove only this generated test version to prove subsequent approval fails closed.
+      await storage.deleteObject(a.storage_object_key,a.storage_version_id);
+      await post('/storage/free-up-space/prepare',{assetIds:[a.id],libraryId}).expect(503);
+      assert.equal((await row(upload.id)).cleanup_integrity_state,'INVALID');assert.deepEqual(await ledger(),before);
+    }finally{if(priorFlag===undefined)delete process.env.ENABLE_FREE_UP_SPACE;else process.env.ENABLE_FREE_UP_SPACE=priorFlag;if(priorContext===undefined)delete process.env.DISPOSABLE_CLEANUP_CONTEXT;else process.env.DISPOSABLE_CLEANUP_CONTEXT=priorContext;}
+  });
+  test('wrong provider cannot authorize or protect and preserves reservation',async()=>{
+    const data=randomBytes(128),key=randomUUID(),upload=(await create(data,key).expect(200)).body;
+    const before=(await pool.query('SELECT protected_bytes,reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0];
+    await pool.query("UPDATE assets SET storage_provider='backblaze_b2',storage_binding=$2 WHERE id=$1",[upload.assetId,'a'.repeat(64)]);
+    await create(data,key).expect(503);
+    await post(`/uploads/${upload.id}/complete`).expect(503);
+    assert.notEqual((await row(upload.id)).status,'PROTECTED');
+    assert.deepEqual((await pool.query('SELECT protected_bytes,reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0],before);
+  });
+  test('wrong bucket binding blocks signed downloads without changing protected quota',async()=>{
+    const {upload}=await protectedFixture();
+    const before=(await pool.query('SELECT protected_bytes,reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0];
+    await pool.query('UPDATE assets SET storage_binding=$2 WHERE id=$1',[upload.assetId,'a'.repeat(64)]);
+    await post(`/assets/${upload.assetId}/download`).expect(503);
+    assert.deepEqual((await pool.query('SELECT protected_bytes,reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0],before);
+  });
+  test('wrong provider blocks multipart start before remote mutation',async()=>{
+    const d=randomBytes(128),upload=(await post('/uploads',{...body(d),multipart:true}).set('Idempotency-Key',randomUUID()).expect(200)).body;
+    await pool.query("UPDATE assets SET storage_provider='backblaze_b2',storage_binding=$2 WHERE id=$1",[upload.assetId,'a'.repeat(64)]);
+    await post(`/uploads/${upload.id}/multipart`).expect(503);
+    assert.equal((await pool.query('SELECT multipart_upload_id FROM upload_sessions WHERE id=$1',[upload.id])).rows[0].multipart_upload_id,null);
   });
   test('unauthenticated and invalid-auth upload creation fail',async () => {
     await request(app.getHttpServer()).post('/uploads').send(body(randomBytes(5))).set('Idempotency-Key',randomUUID()).expect(401);
@@ -145,7 +197,7 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
     assert.ok((await put(upload,data)).ok); assert.equal((await row(upload.id)).status,'UPLOADING');
     await post(`/uploads/${upload.id}/complete`).expect(200).expect(r=>assert.equal(r.body.status,'PROTECTED'));
     const asset=await request(app.getHttpServer()).get(`/assets/${upload.assetId}`).set('Authorization',`Bearer ${token}`).expect(200);
-    assert.deepEqual(asset.body,{id:upload.assetId,mediaType:'test',status:'PROTECTED',sizeBytes:data.length});
+    assert.equal(asset.body.id,upload.assetId); assert.equal(asset.body.status,'PROTECTED'); assert.equal(asset.body.sizeBytes,data.length); assert.ok(asset.body.protectedAt);
     const download=(await post(`/assets/${upload.assetId}/download`).expect(200)).body;
     const bytes=Buffer.from(await (await fetch(download.url)).arrayBuffer()); assert.equal(digest(bytes),digest(data));
     const ent=(await pool.query('SELECT * FROM development_entitlements WHERE user_id=$1',[userId])).rows[0];
@@ -158,12 +210,20 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
     assert.equal((await pool.query("SELECT COUNT(*)::int AS n FROM asset_verifications WHERE asset_id=$1 AND verification_status='SUCCEEDED'",[upload.assetId])).rows[0].n,1);
     assert.equal(Number((await pool.query('SELECT protected_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0].protected_bytes),100);
   });
+  test('dashboard summary stays consistent while duplicate verification moves quota once',async()=>{
+    const data=randomBytes(100),upload=(await create(data).expect(200)).body;assert.ok((await put(upload,data)).ok);
+    const read=()=>request(app.getHttpServer()).get('/storage/summary').set('Authorization',`Bearer ${token}`);
+    const responses=await Promise.all([post(`/uploads/${upload.id}/complete`),read(),read(),post(`/uploads/${upload.id}/complete`)]);
+    for(const r of responses)assert.equal(r.status,200);
+    for(const r of [responses[1],responses[2]])assert.equal(r.body.protectedBytes+r.body.reservedBytes,100);
+    const final=(await read().expect(200)).body;assert.equal(final.protectedBytes,100);assert.equal(final.reservedBytes,0);assert.equal(final.assetCount,1);
+  });
   test('quota exceeded is rejected using protected bytes and reservations',async () => {
     const data=randomBytes(100); await create(data).expect(200);
-    await pool.query('UPDATE development_entitlements SET quota_bytes=150 WHERE user_id=$1',[userId]); await create(data).expect(409);
+    await pool.query("INSERT INTO manual_entitlements(user_id,quota_bytes,reason) VALUES($1,150,'GENERATED_TEST') ON CONFLICT(user_id) DO UPDATE SET quota_bytes=150",[userId]); await create(data).expect(409);
   });
   test('simultaneous quota race admits only one upload',async () => {
-    await pool.query('INSERT INTO development_entitlements(user_id,quota_bytes) VALUES($1,150)',[userId]);
+    await pool.query("INSERT INTO manual_entitlements(user_id,quota_bytes,reason) VALUES($1,150,'GENERATED_TEST')",[userId]);
     const results=await Promise.all([create(randomBytes(100)),create(randomBytes(100))]);
     assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
     assert.equal(Number((await pool.query('SELECT reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0].reserved_bytes),100);
@@ -211,8 +271,9 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
     assert.match(a.storage_object_key,/^objects\/[0-9a-f]{8}\/[0-9a-f-]{36}$/); assert.ok(!a.storage_object_key.includes(email));
     assert.ok(!JSON.stringify(upload).includes(process.env.S3_SECRET_ACCESS_KEY!)); assert.ok(!JSON.stringify(upload).includes(process.env.MINIO_ROOT_PASSWORD!));
     const metadata=(await request(app.getHttpServer()).get(`/assets/${upload.assetId}`).set('Authorization',`Bearer ${token}`).expect(200)).body;
-    assert.deepEqual(Object.keys(metadata).sort(),['id','mediaType','sizeBytes','status']);
+    assert.deepEqual(Object.keys(metadata).sort(),['captureDate','createdAt','device','durationSeconds','id','mediaType','protectedAt','sizeBytes','status']);
     await post('/uploads',{...body(randomBytes(5)),original_filename:'private.jpg'}).set('Idempotency-Key',randomUUID()).expect(400);
+    for(const field of ['bucket','storage_object_key','storage_provider','provider_version_id'])await post('/uploads',{...body(randomBytes(5)),[field]:'arbitrary'}).set('Idempotency-Key',randomUUID()).expect(400);
   });
   test('oversized/malformed payload metadata is rejected before authorization',async () => {
     for (const size of [0,-1,5*1024*1024+1]) await post('/uploads',{media_type:'test',expected_size_bytes:size,checksum_sha256:'a'.repeat(64)}).set('Idempotency-Key',randomUUID()).expect(400);
@@ -239,7 +300,7 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
     assert.ok((await put(upload,data)).ok); assert.equal((await post(`/uploads/${upload.id}/complete`).expect(200)).body.status,'PROTECTED');
   });
   test('protected bytes continue counting against quota after reservation moves',async () => {
-    await protectedFixture(); await pool.query('UPDATE development_entitlements SET quota_bytes=300 WHERE user_id=$1',[userId]);
+    await protectedFixture(); await pool.query("INSERT INTO manual_entitlements(user_id,quota_bytes,reason) VALUES($1,300,'GENERATED_TEST') ON CONFLICT(user_id) DO UPDATE SET quota_bytes=300",[userId]);
     await create(randomBytes(100)).expect(409);
   });
   test('expired verifier lease can be reclaimed without duplicate quota movement',async () => {
@@ -308,5 +369,101 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
     token=(await request(app.getHttpServer()).post('/auth/login').send({email,password}).expect(200)).body.sessionToken;
     await pool.query("UPDATE upload_sessions SET verification_lease_until=now()-interval '1 second' WHERE id=$1",[upload.id]);
     assert.equal((await post(`/uploads/${upload.id}/complete`).expect(200)).body.status,'PROTECTED');
+  });  const multipartFixture=async (bytes=12*1024*1024) => {
+    const data=Buffer.alloc(bytes,0x65),upload=(await post('/uploads',{...body(data),multipart:true,device_id:deviceId}).set('Idempotency-Key',randomUUID()).expect(200)).body;
+    await post(`/uploads/${upload.id}/multipart`).expect(200);return {data,upload};
+  };
+  const uploadPart=async (upload:any,data:Buffer,number:number) => {
+    const start=(number-1)*upload.partSizeBytes,part=data.subarray(start,Math.min(start+upload.partSizeBytes,data.length));
+    const auth=(await post(`/uploads/${upload.id}/parts/${number}/authorize`,{size_bytes:part.length,checksum_sha256:digest(part)}).expect(200)).body;
+    const response=await fetch(auth.url,{method:'PUT',headers:auth.headers,body:part});assert.ok(response.ok);return {part,auth};
+  };
+  test('multipart interrupt, storage reconciliation, completion and verified private roundtrip',async()=>{
+    const {data,upload}=await multipartFixture();assert.equal(upload.authorization,null);
+    await uploadPart(upload,data,1);
+    assert.deepEqual((await request(app.getHttpServer()).get(`/uploads/${upload.id}/parts`).set('Authorization',`Bearer ${token}`).expect(200)).body.parts,[{partNumber:1,sizeBytes:upload.partSizeBytes}]);
+    await post(`/uploads/${upload.id}/complete-multipart`).expect(409);await uploadPart(upload,data,2);
+    const complete=(await post(`/uploads/${upload.id}/complete-multipart`).expect(200)).body;assert.equal(complete.status,'UPLOADED');
+    assert.equal((await row(upload.id)).protected_at,null);await post(`/assets/${upload.assetId}/download`).expect(409);
+    assert.equal((await post(`/uploads/${upload.id}/complete`).expect(200)).body.status,'PROTECTED');
+    const a=await row(upload.id);remember(a.storage_object_key,a.storage_version_id);
+    const download=(await post(`/assets/${upload.assetId}/download`).expect(200)).body;
+    assert.equal(digest(Buffer.from(await(await fetch(download.url)).arrayBuffer())),digest(data));
+    assert.equal((await fetch(`${process.env.S3_ENDPOINT}/${process.env.S3_BUCKET}/${a.storage_object_key}`)).status,403);
   });
+  test('duplicate part upload and duplicate concurrent multipart completion are safe',async()=>{
+    const {data,upload}=await multipartFixture();await uploadPart(upload,data,1);await uploadPart(upload,data,1);await uploadPart(upload,data,2);
+    const results=await Promise.all([post(`/uploads/${upload.id}/complete-multipart`),post(`/uploads/${upload.id}/complete-multipart`)]);results.forEach(r=>assert.equal(r.status,200));
+    await post(`/uploads/${upload.id}/complete`).expect(200);await post(`/uploads/${upload.id}/complete`).expect(200);
+    const a=await row(upload.id);remember(a.storage_object_key,a.storage_version_id);
+    assert.equal(Number((await pool.query('SELECT protected_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0].protected_bytes),data.length);
+  });
+  test('multipart storage completion lost before database commit recovers immutable version',async()=>{
+    const {data,upload}=await multipartFixture();await uploadPart(upload,data,1);await uploadPart(upload,data,2);
+    const r=(await pool.query('SELECT u.*,a.storage_object_key FROM upload_sessions u JOIN assets a ON a.id=u.asset_id WHERE u.id=$1',[upload.id])).rows[0];
+    const version=await storage.completeMultipart(r.storage_object_key,r.multipart_upload_id,await storage.listParts(r.storage_object_key,r.multipart_upload_id));remember(r.storage_object_key,version);
+    assert.equal((await post(`/uploads/${upload.id}/complete-multipart`).expect(200)).body.status,'UPLOADED');
+    assert.equal((await post(`/uploads/${upload.id}/complete`).expect(200)).body.status,'PROTECTED');assert.equal((await row(upload.id)).storage_version_id,version);
+  });
+  test('wrong user and same-user wrong device cannot authorize or resume multipart',async()=>{
+    const {data,upload}=await multipartFixture();
+    for(const path of [`/uploads/${upload.id}/multipart`,`/uploads/${upload.id}/complete-multipart`])await post(path,{},other).expect(404);
+    await post(`/uploads/${upload.id}/parts/1/authorize`,{size_bytes:upload.partSizeBytes,checksum_sha256:digest(data.subarray(0,upload.partSizeBytes))},other).expect(404);
+    const second=(await request(app.getHttpServer()).post('/auth/login').send({email,password,device:{identifier:randomUUID(),displayName:'Generated second device',platform:'other'}}).expect(200)).body.sessionToken;
+    await post(`/uploads/${upload.id}/multipart`,{},second).expect(404);await post(`/uploads/${upload.id}/parts/1/authorize`,{size_bytes:upload.partSizeBytes,checksum_sha256:digest(data.subarray(0,upload.partSizeBytes))},second).expect(404);
+  });
+  test('part-number and oversized part abuse are rejected',async()=>{
+    const {upload}=await multipartFixture();const valid={size_bytes:upload.partSizeBytes,checksum_sha256:'a'.repeat(64)};
+    for(const n of ['0','-1','3','10001','1.5','01'])await post(`/uploads/${upload.id}/parts/${n}/authorize`,valid).expect(400);
+    await post(`/uploads/${upload.id}/parts/1/authorize`,{...valid,size_bytes:upload.partSizeBytes+1}).expect(400);
+    await post(`/uploads/${upload.id}/parts/1/authorize`,{...valid,storage_object_key:'injected'}).expect(400);
+    await post(`/uploads/${upload.id}/complete-multipart`,{status:'PROTECTED'}).expect(400);
+    // Explicit generated-session cancellation leaves incomplete bytes for manual cleanup.
+    await request(app.getHttpServer()).delete(`/uploads/${upload.id}`).set('Authorization',`Bearer ${token}`).expect(200);
+  });
+  test('part identity is stable and authorization can refresh after expiry',async()=>{
+    const {data,upload}=await multipartFixture(),part=data.subarray(0,upload.partSizeBytes),input={size_bytes:part.length,checksum_sha256:digest(part)};
+    await post(`/uploads/${upload.id}/parts/1/authorize`,input).expect(200);
+    const r=(await pool.query('SELECT u.*,a.storage_object_key FROM upload_sessions u JOIN assets a ON a.id=u.asset_id WHERE u.id=$1',[upload.id])).rows[0];
+    const expired=await storage.authorizePart(r.storage_object_key,r.multipart_upload_id,1,part.length,digest(part),1);await new Promise(resolve=>setTimeout(resolve,2200));
+    assert.equal((await fetch(expired.url,{method:'PUT',headers:expired.headers,body:part})).status,403);
+    await uploadPart(upload,data,1);await post(`/uploads/${upload.id}/parts/1/authorize`,{...input,checksum_sha256:'b'.repeat(64)}).expect(409);
+    await request(app.getHttpServer()).delete(`/uploads/${upload.id}`).set('Authorization',`Bearer ${token}`).expect(200);
+  });
+  test('cancellation holds multipart reservation and blocks completion/replay authorization',async()=>{
+    const {data,upload}=await multipartFixture();await uploadPart(upload,data,1);
+    await request(app.getHttpServer()).delete(`/uploads/${upload.id}`).set('Authorization',`Bearer ${token}`).expect(200);
+    await post(`/uploads/${upload.id}/parts/2/authorize`,{}).expect(400);await post(`/uploads/${upload.id}/multipart`).expect(410);await post(`/uploads/${upload.id}/complete-multipart`).expect(410);
+    assert.equal(Number((await pool.query('SELECT reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0].reserved_bytes),data.length);
+    assert.equal((await row(upload.id)).protected_at,null);
+  });
+  test('expired multipart session blocks resume authorization and releases reservation once',async()=>{
+    const {data,upload}=await multipartFixture();await pool.query("UPDATE upload_sessions SET expires_at=now()-interval '1 second' WHERE id=$1",[upload.id]);
+    await post(`/uploads/${upload.id}/parts/1/authorize`,{size_bytes:upload.partSizeBytes,checksum_sha256:digest(data.subarray(0,upload.partSizeBytes))}).expect(410);
+    await post(`/uploads/${upload.id}/multipart`).expect(410);await post(`/uploads/${upload.id}/multipart`).expect(410);
+    // Expire() rolls back when the endpoint returns Gone; explicit complete persists expiry/release.
+    await post(`/uploads/${upload.id}/complete`).expect(200);
+    assert.equal(Number((await pool.query('SELECT reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0].reserved_bytes),0);
+  });
+  test('revoked authentication blocks new part capabilities',async()=>{
+    const {data,upload}=await multipartFixture();await post('/auth/logout').expect(200);
+    await post(`/uploads/${upload.id}/parts/1/authorize`,{size_bytes:upload.partSizeBytes,checksum_sha256:digest(data.subarray(0,upload.partSizeBytes))}).expect(401);
+  });
+  test('concurrent multipart creation cannot exceed reserved quota',async()=>{
+    await pool.query("INSERT INTO manual_entitlements(user_id,quota_bytes,reason) VALUES($1,$2,'GENERATED_TEST')",[userId,12*1024*1024]);
+    const data=Buffer.alloc(12*1024*1024,0x65),input={...body(data),multipart:true};
+    const results=await Promise.all([post('/uploads',input).set('Idempotency-Key',randomUUID()),post('/uploads',input).set('Idempotency-Key',randomUUID())]);
+    assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+    assert.equal(Number((await pool.query('SELECT reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0].reserved_bytes),data.length);
+  });
+
+  test('staff retry verifies real private generated object without exposing a media grant',async()=>{
+    const flag=process.env.INTERNAL_ADMIN_ENABLED;process.env.INTERNAL_ADMIN_ENABLED='true';
+    try{const data=randomBytes(100),upload=(await create(data).expect(200)).body;assert.ok((await put(upload,data)).ok);const adminId=randomUUID(),adminToken=randomBytes(32).toString('base64url');await pool.query("INSERT INTO internal_admins(id,email,email_normalized,password_hash,role) VALUES($1,$2,$2,'unused-generated','SUPPORT')",[adminId,`${adminId}@example.invalid`]);await pool.query("INSERT INTO internal_admin_sessions(id,admin_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '15 minutes')",[randomUUID(),adminId,digest(Buffer.from(adminToken))]);await post(`/internal/uploads/${upload.id}/retry`,{reason:'SUPPORT_REQUEST'},adminToken).set('Idempotency-Key',randomUUID()).expect(200);assert.equal((await app.get(AdminService).runJobs(true)).processed,1);assert.equal((await row(upload.id)).status,'PROTECTED');await post(`/assets/${upload.assetId}/download`,{},adminToken).expect(401);const download=(await post(`/assets/${upload.assetId}/download`).expect(200)).body;assert.equal(digest(Buffer.from(await(await fetch(download.url)).arrayBuffer())),digest(data));}finally{if(flag===undefined)delete process.env.INTERNAL_ADMIN_ENABLED;else process.env.INTERNAL_ADMIN_ENABLED=flag;}
+  });
+  test('multipart implicitly binds to the authenticated device when omitted',async()=>{
+    const data=randomBytes(100),upload=(await post('/uploads',{...body(data),multipart:true}).set('Idempotency-Key',randomUUID()).expect(200)).body;
+    assert.equal((await row(upload.id)).device_id,deviceId);
+  });
+
 });

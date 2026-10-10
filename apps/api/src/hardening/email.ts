@@ -1,0 +1,12 @@
+import {Inject,Injectable} from '@nestjs/common';import {createCipheriv,createDecipheriv,randomBytes,randomUUID} from 'node:crypto';import {DatabaseService} from '../database.service';import {DurableJobs} from './jobs';import {AccountMailer,SMTPAccountMailer,type AccountMail} from '../auth/mail';
+function key(){const value=process.env.MFA_ENCRYPTION_KEY;if(!value||!/^[a-f0-9]{64}$/.test(value))throw new Error('Email encryption unavailable');return Buffer.from(value,'hex');}
+export function sealMail(value:AccountMail,id:string){const iv=randomBytes(12),c=createCipheriv('aes-256-gcm',key(),iv);c.setAAD(Buffer.from('EMAIL:'+id));const data=Buffer.from(JSON.stringify(value));if(data.length>8192)throw new Error('Email bound exceeded');const encrypted=Buffer.concat([c.update(data),c.final()]);return Buffer.concat([iv,c.getAuthTag(),encrypted]).toString('base64url');}
+export function openMail(value:string,id:string):AccountMail{const bytes=Buffer.from(value,'base64url');if(bytes.length<28||bytes.length>8220)throw new Error();const d=createDecipheriv('aes-256-gcm',key(),bytes.subarray(0,12));d.setAAD(Buffer.from('EMAIL:'+id));d.setAuthTag(bytes.subarray(12,28));return JSON.parse(Buffer.concat([d.update(bytes.subarray(28)),d.final()]).toString('utf8'));}
+@Injectable() export class DurableEmailQueue extends AccountMailer{
+ constructor(@Inject(DatabaseService)private db:DatabaseService,@Inject(DurableJobs)private jobs:DurableJobs){super();}
+ async send(message:AccountMail){const id=randomUUID(),encrypted=sealMail(message,id);await this.db.transaction(async c=>{const user=(await c.query('SELECT id FROM users WHERE email_normalized=$1',[message.to.toLowerCase()])).rows[0];await c.query('INSERT INTO durable_email(id,user_id,kind,encrypted_payload) VALUES($1,$2,$3,$4)',[id,user?.id??null,message.kind,encrypted]);await this.jobs.enqueue('EMAIL',id,{emailId:id},c);});}
+ async deliver(id:string,transport:AccountMailer=new SMTPAccountMailer()){const r=(await this.db.query("SELECT e.*,u.status,u.privacy_state FROM durable_email e LEFT JOIN users u ON u.id=e.user_id WHERE e.id=$1 AND e.state='PENDING'",[id])).rows[0];if(!r)return;
+  if(r.user_id&&(r.status!=='ACTIVE'||r.privacy_state!=='ACTIVE')&&r.kind!=='deletion'){await this.db.query("UPDATE durable_email SET state='DEAD',encrypted_payload='' WHERE id=$1",[id]);return;}
+  const message=openMail(r.encrypted_payload,r.id);await transport.send(message);await this.db.query("UPDATE durable_email SET state='SENT',sent_at=now(),encrypted_payload='' WHERE id=$1 AND state='PENDING'",[id]);
+ }
+}

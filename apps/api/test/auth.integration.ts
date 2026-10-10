@@ -8,6 +8,7 @@ import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { AccountMailer, MemoryAccountMailer } from '../src/auth/mail';
+import {AuthModule} from '../src/auth/auth.module';
 import { AuthRateLimit } from '../src/auth/rate-limit';
 import { SafeErrors } from '../src/auth/safe-errors';
 import { digest } from '../src/auth/auth.service';
@@ -34,7 +35,7 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
     url.searchParams.set('options', `-c search_path=${schema}`);
     process.env.DATABASE_URL = url.href;
     const { migrate } = await import('../../../scripts/migrate.mjs');
-    assert.equal(await migrate(), 3);
+    assert.equal(await migrate(), 15);
     assert.equal(await migrate(), 0);
     pool = new Pool({ connectionString: url.href });
     const module = await Test.createTestingModule({ imports: [AppModule] }).overrideProvider(AccountMailer).useValue(mail).overrideGuard(AuthRateLimit).useValue(flowLimiter).compile();
@@ -171,7 +172,7 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
   test('a login verified before a concurrent reset cannot issue an old-password session', async () => {
     await post('/auth/password/forgot', { email: address }).expect(202);
     const raw = message('reset').token;
-    const passwords = app.get(PasswordService);
+    const passwords = app.select(AuthModule).get(PasswordService, {strict:true});
     const originalVerify = passwords.verify.bind(passwords);
     let notify!: () => void; let release!: () => void;
     const verified = new Promise<void>(resolve => { notify = resolve; });
