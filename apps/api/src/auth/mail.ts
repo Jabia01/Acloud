@@ -8,6 +8,7 @@ export abstract class AccountMailer { abstract send(message: AccountMail): Promi
 export class LocalAccountMailer extends AccountMailer {
   async send(message: AccountMail): Promise<void> {
     // No production provider exists yet. Never silently send via a dev sink in production.
+    if(process.env.EMAIL_PROVIDER==='resend')return new ResendAccountMailer().send(message);
     if(process.env.EMAIL_PROVIDER==='smtp')return new SMTPAccountMailer().send(message);
     if (process.env.NODE_ENV === 'production' || process.env.DEV_MAIL_ENABLED !== 'true') throw new Error('Mail transport unavailable');
     const host = process.env.DEV_SMTP_HOST || '127.0.0.1';
@@ -36,10 +37,29 @@ export function betaEmailLink(message:AccountMail,originValue:string){const orig
   if(process.env.EMAIL_PROVIDER!=='smtp'||process.env.SMTP_TLS!=='true'||!process.env.SMTP_HOST||!process.env.SMTP_USER||!process.env.SMTP_PASSWORD||!process.env.SMTP_FROM)throw new Error('Email unavailable');
   const port=Number(process.env.SMTP_PORT??465);if(![465,587].includes(port)||/[\r\n]/.test(process.env.SMTP_FROM))throw new Error('Unsafe email configuration');
   const origin=new URL(process.env.WEB_ORIGIN??'');if(origin.protocol!=='https:'||origin.username||origin.password)throw new Error('Unsafe email origin');
-  let text='An account '+message.kind+' event occurred. Sign in through your trusted account website to review it.';
-  if(message.kind==='deletion'){const messages={REQUESTED:'Account deletion was requested. Your sessions were revoked and renewal is being stopped. Cloud data is retained during the cancellation window. Use the cancellation details you saved on your trusted account website. Your device Photos are unchanged.',CANCELLED:'Account deletion was cancelled. Sign in again. Subscription renewal remains cancelled. Your device Photos are unchanged.',PARTIAL:'Account deletion requires further processing. Access remains restricted. Completed steps are recorded and remaining steps are being retried or reviewed. Your device Photos are unchanged.',COMPLETED:'Your account deletion completed. Cloud objects covered by the verified deletion inventory were removed. Necessary billing, security and deletion evidence may be retained according to the reviewed policy. Your device Photos are unchanged.'};if(!message.lifecycleEvent)throw new Error('Lifecycle notification unavailable');text=messages[message.lifecycleEvent];}
-  if(['verify','reset','invite'].includes(message.kind)){text='Open this single-use link: '+betaEmailLink(message,origin.href)+'\nIf you did not request this, ignore this message.';}
+  const text=accountText(message,origin.href);
   const transport=nodemailer.createTransport({host:process.env.SMTP_HOST,port,secure:port===465,requireTLS:true,tls:{rejectUnauthorized:true},auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASSWORD},logger:false,debug:false,connectionTimeout:5000,socketTimeout:10000});
   try{await transport.sendMail({from:{name:'Account Service',address:process.env.SMTP_FROM},to:message.to,subject:'Account '+message.kind,text});}finally{transport.close();}
+ }
+}
+
+function accountText(message:AccountMail,originValue:string){
+  let text='An account '+message.kind+' event occurred. Sign in through your trusted account website to review it.';
+  if(message.kind==='deletion'){const messages={REQUESTED:'Account deletion was requested. Your sessions were revoked and renewal is being stopped. Cloud data is retained during the cancellation window. Use the cancellation details you saved on your trusted account website. Your device Photos are unchanged.',CANCELLED:'Account deletion was cancelled. Sign in again. Subscription renewal remains cancelled. Your device Photos are unchanged.',PARTIAL:'Account deletion requires further processing. Access remains restricted. Completed steps are recorded and remaining steps are being retried or reviewed. Your device Photos are unchanged.',COMPLETED:'Your account deletion completed. Cloud objects covered by the verified deletion inventory were removed. Necessary billing, security and deletion evidence may be retained according to the reviewed policy. Your device Photos are unchanged.'};if(!message.lifecycleEvent)throw new Error('Lifecycle notification unavailable');text=messages[message.lifecycleEvent];}
+  if(['verify','reset','invite'].includes(message.kind)){text='Open this single-use link: '+betaEmailLink(message,originValue)+'\nIf you did not request this, ignore this message.';}
+  return text;
+}
+
+@Injectable() export class ResendAccountMailer extends AccountMailer{
+ async send(message:AccountMail){
+  const key=process.env.RESEND_API_KEY,from=process.env.SMTP_FROM;
+  if(process.env.EMAIL_PROVIDER!=='resend'||!key||!/^re_[A-Za-z0-9_-]+$/.test(key)||!from||/[\r\n]/.test(from))throw new Error('Email unavailable');
+  const text=accountText(message,process.env.WEB_ORIGIN??'');
+  try{
+   const response=await fetch('https://api.resend.com/emails',{method:'POST',redirect:'error',signal:AbortSignal.timeout(7000),headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({from:'Account Service <'+from+'>',to:[message.to],subject:'Account '+message.kind,text})});
+   if(!response.ok)throw new Error();
+   const result:unknown=await response.json();
+   if(!result||typeof result!=='object'||!('id' in result)||typeof result.id!=='string'||!result.id)throw new Error();
+  }catch{throw new Error('Email delivery unavailable');}
  }
 }

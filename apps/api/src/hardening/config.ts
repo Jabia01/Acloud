@@ -19,8 +19,11 @@ export function validateConfiguration(e:NodeJS.ProcessEnv=process.env){
   const web=origin(e.WEB_ORIGIN),staff=origin(e.STAFF_ORIGIN);origin(e.API_PUBLIC_ORIGIN);
   if(e.CORS_ORIGINS!==web||e.TRUST_PROXY!== 'false'||e.SENSITIVE_LOGGING==='true')throw new Error('Unsafe transport configuration');
   if(!e.STAFF_RP_ID||new URL(staff).hostname!==e.STAFF_RP_ID)throw new Error('Invalid staff RP ID');
-  if(e.EMAIL_PROVIDER!=='smtp'||e.SMTP_TLS!=='true'||!e.SMTP_HOST||!e.SMTP_FROM)throw new Error('Production email required');
-  required(e,'SMTP_PASSWORD');if(!e.SMTP_USER||/[\r\n]/.test(e.SMTP_USER))throw new Error('SMTP identity required');storageConfig(e);
+  if(!e.SMTP_FROM||/[\r\n]/.test(e.SMTP_FROM))throw new Error('Production email sender required');
+  if(e.EMAIL_PROVIDER==='resend'){const key=required(e,'RESEND_API_KEY');if(!/^re_[A-Za-z0-9_-]+$/.test(key))throw new Error('Resend sending key required');}
+  else if(e.EMAIL_PROVIDER==='smtp'){if(e.SMTP_TLS!=='true'||!e.SMTP_HOST)throw new Error('Production email required');required(e,'SMTP_PASSWORD');if(!e.SMTP_USER||/[\r\n]/.test(e.SMTP_USER))throw new Error('SMTP identity required');}
+  else throw new Error('Production email required');
+  storageConfig(e);
   if(e.BILLING_ENABLED==='true'){const key=required(e,'PAYSTACK_SECRET_KEY');if(e.PAYSTACK_ENVIRONMENT!==(mode==='production'?'LIVE':'TEST')||!key.startsWith(mode==='production'?'sk_live_':'sk_test_'))throw new Error('Paystack environment mismatch');}
   if(e.DELETION_COOLDOWN_SECONDS!==undefined&&Number(e.DELETION_COOLDOWN_SECONDS)<86400)throw new Error('Unsafe deletion cooling-off policy');
   if(e.ACCOUNT_DELETION_ENABLED==='true'&&e.PRIVACY_RETENTION_APPROVED!=='true')throw new Error('Approved retention policy required');
