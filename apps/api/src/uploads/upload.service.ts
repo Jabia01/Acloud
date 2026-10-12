@@ -1,3 +1,4 @@
+import {ownerTestConfigured,ownerTestAsset,ownerTestBound,ownerTestTTL} from '../beta/owner-test';
 import {BetaPolicy} from '../beta/policy';import {betaConfiguration} from '../beta/config';
 import {limitSetting} from '../hardening/config';
 import {EntitlementService} from '../billing/entitlement';
@@ -35,6 +36,7 @@ export class UploadService {
     }
   }
   async create(p: Principal,input: UploadInput,idempotencyKey: string) {
+    if(ownerTestConfigured()&&this.storage.identity().provider!=='backblaze_b2')throw new ForbiddenException('Private test provider unavailable');
     if(betaConfiguration().enabled&&this.storage.identity().provider!=='backblaze_b2')throw new ForbiddenException('Accepted B2 provider required');
     const deviceId=input.deviceId ?? (input.multipart ? p.deviceId : null);
     const row = await this.db.transaction(async c => {
@@ -170,6 +172,7 @@ export class UploadService {
     });
   }
   private async checkDevice(c: PoolClient,p: Principal,assetId: string) {
+    if(ownerTestBound(p))await ownerTestAsset(c,p,assetId,['uploads','multipart']);
     const a=(await c.query('SELECT device_id FROM assets WHERE id=$1',[assetId])).rows[0];
     if(a?.device_id && a.device_id!==p.deviceId) throw new NotFoundException('Upload unavailable');
   }
@@ -215,7 +218,7 @@ export class UploadService {
       await c.query('INSERT INTO upload_parts(upload_session_id,part_number,expected_size_bytes,expected_checksum) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[id,number,size,b.checksum_sha256]);
       const ttl=Math.min(uploadTTL(),Math.floor((new Date(r.expires_at).getTime()-Date.now())/1000));
       if(ttl<1) throw new GoneException('Upload expired');
-      return this.storage.authorizePart(r.storage_object_key,r.multipart_upload_id,number,size,b.checksum_sha256 as string,ttl);
+      return this.storage.authorizePart(r.storage_object_key,r.multipart_upload_id,number,size,b.checksum_sha256 as string,ownerTestTTL(ttl));
     });
   }
   private async reconcileParts(c: PoolClient,r: Record<string,any>) {
@@ -330,13 +333,14 @@ export class UploadService {
     await this.beta.open('downloads');
     return this.db.transaction(async c => {
       await this.lock(c,p);
+      if(ownerTestBound(p))await ownerTestAsset(c,p,id,['downloads']);
       const r=(await c.query('SELECT * FROM assets WHERE id=$1 AND user_id=$2',[id,p.userId])).rows[0];
       if (!r) { void this.db.query("INSERT INTO operational_security_events(id,code) VALUES($1,'UPLOAD_TARGET_UNAVAILABLE')",[randomUUID()]).catch(()=>{}); throw new NotFoundException('Asset unavailable'); }
       if (r.status!=='PROTECTED') throw new ConflictException('Asset is not protected');
       this.storage.assertBinding(r.storage_provider,r.storage_binding);
       // Local signing while holding the same user lock as revocation closes the guard/sign gap.
       // Previously issued storage capabilities still live until their short expiry.
-      return this.storage.createDownloadAuthorization(r.storage_object_key,r.storage_version_id,downloadTTL());
+      return this.storage.createDownloadAuthorization(r.storage_object_key,r.storage_version_id,ownerTestTTL(downloadTTL()));
     });
   }
 }
