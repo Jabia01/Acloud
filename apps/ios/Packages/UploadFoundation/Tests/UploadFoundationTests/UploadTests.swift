@@ -169,6 +169,14 @@ final class UploadTests: XCTestCase {
         for _ in 1..<32 { try await store.save(UploadRecord(payload:payload)) }
         do { try await store.save(UploadRecord(payload:payload)); XCTFail("Queue exceeded") } catch {}
     }
+    func testProviderAgnosticSingleUploadHeadersWithoutNativeChecksum() async throws {
+        let transport = try SinglePartUploadTransport(allowedOrigin:URL(string:"https://storage.example.invalid")!)
+        let payload = try GeneratedPayload.inspect(at:file,in:directory)
+        let authorization = UploadAuthorization(method:"PUT",url:URL(string:"https://storage.example.invalid/generated")!,headers:["content-length":String(payload.sizeBytes),"content-type":"application/octet-stream"],expiresAt:"2099-01-01T00:00:00Z")
+        try await transport.validateAuthorization(file:payload,authorization:authorization)
+        let bad = UploadAuthorization(method:"PUT",url:authorization.url,headers:["content-length":String(payload.sizeBytes),"content-type":"application/octet-stream","Authorization":"unexpected"],expiresAt:authorization.expiresAt)
+        do {try await transport.validateAuthorization(file:payload,authorization:bad);XCTFail("Credentials allowed")} catch {}
+    }
     func testUnsignedOrForeignStorageAuthorizationIsRejectedBeforeNetwork() async throws {
         let transport = try SinglePartUploadTransport(allowedOrigin:URL(string:"https://storage.example.invalid")!)
         let payload = try GeneratedPayload.inspect(at:file,in:directory)

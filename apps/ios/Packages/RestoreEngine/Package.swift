@@ -1,0 +1,3 @@
+// swift-tools-version: 5.9
+import PackageDescription
+let package=Package(name:"RestoreEngine",platforms:[.iOS(.v17),.macOS(.v13)],products:[.library(name:"RestoreEngine",targets:["RestoreEngine"])],dependencies:[.package(path:"../MediaPreservation"),.package(path:"../HealthClient")],targets:[.systemLibrary(name:"CRestoreSQLite",pkgConfig:"sqlite3"),.target(name:"RestoreEngine",dependencies:["CRestoreSQLite","HealthClient","MediaPreservation"]),.executableTarget(name:"RestoreFixtureAcceptance",dependencies:["RestoreEngine"],path:"Tools/RestoreFixtureAcceptance"),.testTarget(name:"RestoreEngineTests",dependencies:["RestoreEngine"])])

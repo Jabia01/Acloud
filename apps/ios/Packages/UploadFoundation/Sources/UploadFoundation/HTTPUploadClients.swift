@@ -33,6 +33,7 @@ public actor HTTPUploadSessionClient: UploadSessionClient {
         var request = URLRequest(url: baseURL.appendingPathComponent(path)); request.httpMethod = method; request.httpBody = body
         request.timeoutInterval = 30; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let version=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String,version.range(of:"^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$",options:.regularExpression) != nil{request.setValue(version,forHTTPHeaderField:"X-App-Version")}
         if let key { request.setValue(key.uuidString, forHTTPHeaderField: "Idempotency-Key") }
         let (data,response) = try await network.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw UploadError.requestFailed }
@@ -56,16 +57,19 @@ public actor SinglePartUploadTransport: UploadTransport {
         try safeBase(allowedOrigin, allowLocalHTTP: allowLocalHTTP)
         self.allowedOrigin = allowedOrigin; network = session()
     }
-    public func upload(file: GeneratedPayload, authorization: UploadAuthorization) async throws {
+    func validateAuthorization(file: GeneratedPayload, authorization: UploadAuthorization) throws {
         let url = authorization.url
         guard authorization.method == "PUT", !expired(authorization.expiresAt),
               url.scheme == allowedOrigin.scheme, url.host == allowedOrigin.host, url.port == allowedOrigin.port,
               url.user == nil, url.password == nil, url.fragment == nil else { throw UploadError.invalidAuthorization }
         guard authorization.headers["content-length"] == String(file.sizeBytes),
-              authorization.headers["if-none-match"] == "*", authorization.headers["content-type"] == "application/octet-stream",
-              authorization.headers["x-amz-checksum-sha256"] == Self.base64Digest(file.checksumSHA256),
-              Set(authorization.headers.keys) == Set(["content-length","if-none-match","content-type","x-amz-checksum-sha256"]) else { throw UploadError.invalidAuthorization }
-        var request = URLRequest(url: url); request.httpMethod = "PUT"; request.timeoutInterval = 30
+              authorization.headers["content-type"] == "application/octet-stream",
+              Self.base64Digest(file.checksumSHA256) != nil,
+              (Set(authorization.headers.keys) == Set(["content-length","content-type"]) || (Set(authorization.headers.keys) == Set(["content-length","if-none-match","content-type","x-amz-checksum-sha256"]) && authorization.headers["if-none-match"] == "*" && authorization.headers["x-amz-checksum-sha256"] == Self.base64Digest(file.checksumSHA256))) else { throw UploadError.invalidAuthorization }
+    }
+    public func upload(file: GeneratedPayload, authorization: UploadAuthorization) async throws {
+        try validateAuthorization(file:file,authorization:authorization)
+        var request = URLRequest(url: authorization.url); request.httpMethod = "PUT"; request.timeoutInterval = 30
         for (name,value) in authorization.headers { request.setValue(value, forHTTPHeaderField: name) }
         // No API bearer/cookies or redirect following on the direct storage request.
         let (_,response) = try await network.upload(for: request, fromFile: file.fileURL)

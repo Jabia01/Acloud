@@ -1,0 +1,348 @@
+import XCTest
+import Foundation
+import CryptoKit
+import UploadFoundation
+import DiscoveryCore
+@testable import BackupEngine
+
+private func asset(_ id:UUID,status:String,size:Int) throws -> ServerAsset {
+ try JSONDecoder().decode(ServerAsset.self,from:JSONSerialization.data(withJSONObject:["id":id.uuidString,"mediaType":"test","status":status,"sizeBytes":size]))
+}
+private actor TestAPI:MultipartAPI {
+ let id=UUID(),assetID=UUID();var phase:RemoteAssetStatus = .queued;var size=0;var accepted:[CompletedPart]=[]
+ var creates=0;var completed=false;var verificationUnavailable=false;var cancelled=false;var authorizations=0
+ func create(_ item:BackupItem) -> MultipartSession {creates+=1;size=item.expectedSizeBytes!;return response()}
+ func response() -> MultipartSession {MultipartSession(id:id,assetId:assetID,status:phase,partSizeBytes:5*1024*1024)}
+ func status(_ id:UUID) -> MultipartSession{response()}
+ func start(_ id:UUID) -> MultipartSession{phase = .uploading;return response()}
+ func parts(_ id:UUID) -> PartListing{PartListing(completed:completed,parts:accepted)}
+ func authorize(_ id:UUID,number:Int,size:Int,checksum:String) throws -> UploadAuthorization {
+  authorizations+=1
+  return try JSONDecoder().decode(UploadAuthorization.self,from:JSONSerialization.data(withJSONObject:["method":"PUT","url":"https://storage.example.invalid/part","headers":["content-length":String(size)],"expiresAt":"2099-01-01T00:00:00.000Z"]))
+ }
+ func complete(_ id:UUID) -> MultipartSession{completed=true;phase = .uploaded;return response()}
+ func verify(_ id:UUID) throws -> MultipartSession{if verificationUnavailable{throw BackupFailure.http(503)};phase = .protected;return response()}
+ func asset(_ id:UUID) throws -> ServerAsset{try BackupEngineTests.remote(assetID,status:phase.rawValue,size:size)}
+ func cancel(_ id:UUID){cancelled=true;phase = .cancelled}
+ func accept(_ number:Int,size:Int){accepted.removeAll{$0.partNumber==number};accepted.append(CompletedPart(partNumber:number,sizeBytes:size))}
+ func failVerification(_ value:Bool){verificationUnavailable=value}
+ func forceProtected(size:Int){self.size=size;phase = .protected;completed=true}
+}
+private actor TestTransport:PartTransport {
+ var backgroundIDs:Set<UUID>=[];var cancelledIDs:Set<UUID>=[]
+ func background(_ id:UUID){backgroundIDs.insert(id)}
+ func activeItemIDs()async->Set<UUID>{backgroundIDs}
+ let api:TestAPI;var numbers:[Int]=[];var failNumber:Int?;var loseResponse=false;var failAuthorization=false
+ init(api:TestAPI){self.api=api}
+ func configure(fail:Int?,lose:Bool=false,expired:Bool=false){failNumber=fail;loseResponse=lose;failAuthorization=expired}
+ func upload(item:UUID,number:Int,resource:PreparedResource,authorization:UploadAuthorization,policy:BackupPolicy) async throws {
+  numbers.append(number)
+  if failNumber==number {failNumber=nil;if loseResponse{await api.accept(number,size:resource.sizeBytes)};throw failAuthorization ? BackupFailure.authorization : URLError(.networkConnectionLost)}
+  await api.accept(number,size:resource.sizeBytes)
+ }
+ func cancel(item:UUID) {backgroundIDs.remove(item);cancelledIDs.insert(item)}
+}
+private struct WaitingPreparer:ResourcePreparer {
+ let denied:Bool
+ func prepare(_ item:BackupItem,policy:BackupPolicy,network:NetworkSnapshot) async throws -> PreparedResource{throw denied ? BackupFailure.inaccessible : BackupFailure.waitingForOriginal}
+ func cleanup(_ item:BackupItem) async throws {}
+}
+final class BackupEngineTests:XCTestCase {
+ fileprivate static func remote(_ id:UUID,status:String,size:Int) throws -> ServerAsset{try asset(id,status:status,size:size)}
+ private func directory() throws -> URL {let d=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try FileManager.default.createDirectory(at:d,withIntermediateDirectories:true);addTeardownBlock{try? FileManager.default.removeItem(at:d)};return d}
+ private func fixture(bytes:Int=12*1024*1024) async throws -> (SQLiteBackupQueue,BackupCoordinator,TestAPI,TestTransport,BackupItem,ManagedTemporaryFiles,URL) {
+  let d=try directory(),source=d.appendingPathComponent("source");try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+  let local=UUID(),url=source.appendingPathComponent(local.uuidString+".bin")
+  FileManager.default.createFile(atPath:url.path,contents:nil);let h=try FileHandle(forWritingTo:url)
+  var left=bytes;let chunk=Data(repeating:0x65,count:64*1024);while left>0{try h.write(contentsOf:chunk.prefix(min(chunk.count,left)));left-=min(chunk.count,left)};try h.close()
+  let files=try ManagedTemporaryFiles(directory:d.appendingPathComponent("temp")),queue=try SQLiteBackupQueue(url:d.appendingPathComponent("queue.sqlite"))
+  let api=TestAPI(),transport=TestTransport(api:api),item=BackupItem(libraryID:UUID(),localAssetIdentifier:local.uuidString,mediaType:"test")
+  _=try await queue.enqueue(item)
+  let engine=BackupCoordinator(queue:queue,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:source,files:files),files:files)
+  try await engine.setNetwork(NetworkSnapshot());return(queue,engine,api,transport,item,files,d)
+ }
+ func testStartupPreservesBackgroundTransferAndDoesNotUploadAgain()async throws{
+  let(q,e,_,t,item,files,_)=try await fixture(bytes:10)
+  let retained=files.directory.appendingPathComponent(item.id.uuidString+".bin");try Data([1,2,3]).write(to:retained)
+  await t.background(item.id);try await e.reconcileStartup();try await e.runDue()
+  let cancelled=await t.cancelledIDs,numbers=await t.numbers,state=try await q.read(item.id)?.state
+  XCTAssertTrue(cancelled.isEmpty);XCTAssertTrue(numbers.isEmpty);XCTAssertEqual(state,.queued);XCTAssertTrue(FileManager.default.fileExists(atPath:retained.path))
+ }
+ func testStartupCancelsUnknownBackgroundTransfer()async throws{
+  let(_,e,_,t,_,_,_)=try await fixture(bytes:10);let unknown=UUID();await t.background(unknown);try await e.reconcileStartup();let cancelled=await t.cancelledIDs;XCTAssertTrue(cancelled.contains(unknown))
+ }
+ func testStartupHonorsPausedBackgroundTransfer()async throws{
+  let(q,e,_,t,item,_,_)=try await fixture(bytes:10);var paused=item;paused.state = .paused;_=try await q.save(paused);await t.background(item.id);try await e.reconcileStartup();let cancelled=await t.cancelledIDs,state=try await q.read(item.id)?.state;XCTAssertTrue(cancelled.contains(item.id));XCTAssertEqual(state,.paused)
+ }
+ func testQueueSurvivesReopenAndSimulatedDeviceRestart() async throws {
+  let d=try directory(),url=d.appendingPathComponent("queue.sqlite"),item=BackupItem(libraryID:UUID(),localAssetIdentifier:"mock",mediaType:"test")
+  var q:SQLiteBackupQueue?=try SQLiteBackupQueue(url:url);_=try await q!.enqueue(item);q=nil
+  let restarted=try SQLiteBackupQueue(url:url);let result=try await restarted.read(item.id);XCTAssertEqual(result?.state,.queued)
+ }
+ func testDuplicateIdentityIsScopedToLibrary() async throws {
+  let q=try SQLiteBackupQueue(url:directory().appendingPathComponent("queue.sqlite")),lib=UUID()
+  let a=try await q.enqueue(BackupItem(libraryID:lib,localAssetIdentifier:"same",mediaType:"test"))
+  let b=try await q.enqueue(BackupItem(libraryID:lib,localAssetIdentifier:"same",mediaType:"test"))
+  let c=try await q.enqueue(BackupItem(libraryID:UUID(),localAssetIdentifier:"same",mediaType:"test"))
+  XCTAssertEqual(a,b);XCTAssertNotEqual(a,c)
+ }
+ func testProtectionCannotBeSavedAsClientState() async throws {
+  let(q,_,_,_,item,_,_)=try await fixture(bytes:10);var forged=item;forged.state = .protected
+  do{_=try await q.save(forged);XCTFail()}catch{XCTAssertEqual(error as? BackupFailure,.illegalTransition)}
+ }
+ func testWrongAssetProofCannotProtect() async throws {
+  let(q,_,_,_,item,_,_)=try await fixture(bytes:10);var forged=item;forged.state = .protected;forged.assetID=UUID();forged.expectedSizeBytes=10
+  do{_=try await q.protect(forged,proof:asset(UUID(),status:"PROTECTED",size:10));XCTFail()}catch{XCTAssertEqual(error as? BackupFailure,.illegalTransition)}
+ }
+ func testStaleCallbacksRejected() async throws {
+  let(q,_,_,_,item,_,_)=try await fixture(bytes:10);var paused=item;paused.state = .paused;_=try await q.save(paused)
+  do{_=try await q.save(item);XCTFail()}catch{XCTAssertEqual(error as? BackupFailure,.staleWrite)}
+ }
+ func testSmallFileThroughMultipartAndServerVerification() async throws {
+  let(q,e,_,t,item,files,_)=try await fixture(bytes:100);try await e.run(item.id)
+  let result=try await q.read(item.id);XCTAssertEqual(result?.state,.protected);let numbers=await t.numbers;XCTAssertEqual(numbers,[1]);XCTAssertFalse(FileManager.default.fileExists(atPath:files.url(item.id).path))
+ }
+ func testGenerated20MiBMultipart() async throws {
+  let(q,e,_,t,item,_,_)=try await fixture(bytes:20*1024*1024);let start=Date();try await e.run(item.id)
+  let result=try await q.read(item.id);let parts=await t.numbers;XCTAssertEqual(result?.state,.protected);XCTAssertEqual(parts,[1,2,3,4]);print("Generated 20 MiB mock-engine elapsed seconds: \(Date().timeIntervalSince(start))")
+ }
+ func testPartRetryResumesAfterRestart() async throws {
+  let(q,e,api,t,item,files,d)=try await fixture();await t.configure(fail:2)
+  do{try await e.run(item.id);XCTFail()}catch{}
+  let partial=try await q.read(item.id);XCTAssertEqual(partial?.state,.failedRetryable)
+  let reopened=try SQLiteBackupQueue(url:d.appendingPathComponent("queue.sqlite"))
+  let next=BackupCoordinator(queue:reopened,api:api,transport:t,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await next.setNetwork(NetworkSnapshot());try await next.reconcileStartup();try await next.retryFailed(item.id);try await next.run(item.id)
+  let result=try await reopened.read(item.id);let parts=await t.numbers;XCTAssertEqual(result?.state,.protected);XCTAssertEqual(parts,[1,2,2,3])
+ }
+ func testCrashBeforeLocalPartCommitReconcilesStorage() async throws {
+  let(q,e,_,t,item,_,_)=try await fixture();await t.configure(fail:2,lose:true)
+  do{try await e.run(item.id)}catch{}
+  let committed=try await q.parts(item.id);XCTAssertEqual(committed.map(\.partNumber),[1])
+  try await e.retryFailed(item.id);try await e.run(item.id);let parts=await t.numbers;XCTAssertEqual(parts,[1,2,3]);let final=try await q.read(item.id);XCTAssertEqual(final?.state,.protected)
+ }
+ func testExpiredAuthorizationRefreshesOnRetry() async throws {
+  let(q,e,api,t,item,_,_)=try await fixture(bytes:100);await t.configure(fail:1,expired:true)
+  do{try await e.run(item.id)}catch{};try await e.retryFailed(item.id);try await e.run(item.id)
+  let count=await api.authorizations;XCTAssertEqual(count,2);let result=try await q.read(item.id);XCTAssertEqual(result?.state,.protected)
+ }
+ func testVerificationOutageRetainsUploadedObjectAndRetries() async throws {
+  let(q,e,api,t,item,_,_)=try await fixture(bytes:100);await api.failVerification(true)
+  do{try await e.run(item.id)}catch{};await api.failVerification(false);try await e.retryFailed(item.id);try await e.run(item.id)
+  let parts=await t.numbers;XCTAssertEqual(parts,[1]);let result=try await q.read(item.id);XCTAssertEqual(result?.state,.protected)
+ }
+ func testStaleQueueAlreadyProtectedNeverTransfers() async throws {
+  let(q,e,api,t,item,_,_)=try await fixture(bytes:100);var r=item;r.assetID=api.assetID;r.sessionID=api.id;r.expectedSizeBytes=100;_=try await q.save(r);await api.forceProtected(size:100)
+  try await e.reconcileStartup();try await e.run(item.id);let parts=await t.numbers;XCTAssertTrue(parts.isEmpty);let result=try await q.read(item.id);XCTAssertEqual(result?.state,.protected)
+ }
+ func testCancelNeverDeletesGeneratedSource() async throws {
+  let(q,e,_,_,item,_,d)=try await fixture(bytes:100);try await e.cancel(item.id);try await e.run(item.id)
+  let result=try await q.read(item.id);XCTAssertEqual(result?.state,.cancelled);XCTAssertTrue(FileManager.default.fileExists(atPath:d.appendingPathComponent("source").appendingPathComponent(item.localAssetIdentifier+".bin").path))
+ }
+ func testPauseAndResumeAll() async throws {
+  let(q,e,_,_,item,_,_)=try await fixture(bytes:100);try await e.pauseAll();let paused=try await q.read(item.id);XCTAssertEqual(paused?.state,.paused)
+  try await e.resumeAll();let queued=try await q.read(item.id);XCTAssertEqual(queued?.state,.queued);try await e.run(item.id);let done=try await q.read(item.id);XCTAssertEqual(done?.state,.protected)
+ }
+ func testRetryJitterAndBackoffBounds() {
+  let r=RetryPolicy();for attempt in 1...30{let lo=r.delay(attempt:attempt,random:0),hi=r.delay(attempt:attempt,random:1);XCTAssertEqual(hi,lo*2);XCTAssertLessThanOrEqual(hi,3600);XCTAssertGreaterThan(lo,0)}
+  XCTAssertGreaterThan(r.delay(attempt:3,random:1),r.delay(attempt:2,random:1))
+ }
+ func testRetryClassification() {
+  let r=RetryPolicy();for status in [408,429,500,503]{XCTAssertTrue(r.retryable(BackupFailure.http(status)))}
+  for status in [400,401,403,404,409,410]{XCTAssertFalse(r.retryable(BackupFailure.http(status)))}
+  XCTAssertTrue(r.retryable(BackupFailure.authorization));XCTAssertFalse(r.retryable(BackupFailure.sourceChanged));XCTAssertTrue(r.retryable(URLError(.timedOut)))
+ }
+ func testNetworkPolicyUnknownSizeCellularAndConstrained() {
+  var p=BackupPolicy(),item=BackupItem(libraryID:UUID(),localAssetIdentifier:"mock",mediaType:"video")
+  let cell=NetworkSnapshot(cellular:true,wifi:false);XCTAssertFalse(p.permits(item,network:cell));p.wifiOnly=false;p.allowCellular=true
+  XCTAssertFalse(p.permits(item,network:cell));item.expectedSizeBytes=8*1024*1024;XCTAssertFalse(p.permits(item,network:cell));p.allowLargeVideosOnCellular=true;XCTAssertTrue(p.permits(item,network:cell))
+  item.expectedSizeBytes=11*1024*1024;XCTAssertFalse(p.permits(item,network:cell));XCTAssertFalse(p.permits(item,network:NetworkSnapshot(constrained:true)))
+ }
+ func testNetworkChangePausesBeforeTransfer() async throws {
+  let(q,e,_,t,item,_,_)=try await fixture(bytes:100);try await e.setNetwork(NetworkSnapshot(cellular:true,wifi:false));try await e.run(item.id)
+  let result=try await q.read(item.id);let parts=await t.numbers;XCTAssertEqual(result?.state,.paused);XCTAssertTrue(parts.isEmpty)
+ }
+ func testICloudWaitAndDeniedAccessPauseWithoutDestruction() async throws {
+  for denied in [false,true]{let(q,_,api,t,item,files,_)=try await fixture(bytes:100)
+   let e=BackupCoordinator(queue:q,api:api,transport:t,preparer:WaitingPreparer(denied:denied),files:files);try await e.setNetwork(NetworkSnapshot());do{try await e.run(item.id)}catch{}
+   let result=try await q.read(item.id);XCTAssertEqual(result?.state,.paused);let cancelled=await api.cancelled;XCTAssertFalse(cancelled)
+  }
+ }
+ func testTempTraversalRejected() throws {
+  let d=try directory(),files=try ManagedTemporaryFiles(directory:d.appendingPathComponent("temp"));let outside=d.appendingPathComponent("keep.bin");try Data([1]).write(to:outside)
+  XCTAssertThrowsError(try files.remove(outside));XCTAssertTrue(FileManager.default.fileExists(atPath:outside.path))
+ }
+ func testStreamingHashAndPartBoundaries() throws {
+  let d=try directory(),url=d.appendingPathComponent("mock.bin");try Data(repeating:7,count:6*1024*1024+1).write(to:url)
+  let resource=try StreamingIntegrity.inspect(url),files=try ManagedTemporaryFiles(directory:d.appendingPathComponent("parts")),id=UUID()
+  let a=try files.part(resource,id:id,number:1,size:5*1024*1024),b=try files.part(resource,id:id,number:2,size:5*1024*1024)
+  XCTAssertEqual(a.sizeBytes,5*1024*1024);XCTAssertEqual(b.sizeBytes,1024*1024+1);XCTAssertEqual(resource.checksum.count,64)
+ }
+ func testQueueRecordsContainNoAuthorizationOrCredentials() async throws {
+  let(q,e,_,_,item,_,d)=try await fixture(bytes:100);try await e.run(item.id);let r=try await q.read(item.id)!
+  let text=String(data:try JSONEncoder().encode(r),encoding:.utf8)!;for key in ["https://","X-Amz","Bearer","secret","authorization"]{XCTAssertFalse(text.contains(key))}
+  let values=try d.resourceValues(forKeys:[.isDirectoryKey]);XCTAssertTrue(values.isDirectory == true)
+ }
+ func testQueueScale1000_10000_100000() async throws {
+  let q=try SQLiteBackupQueue(url:directory().appendingPathComponent("queue.sqlite")),library=UUID();let start=Date()
+  for i in 0..<100000{_=try await q.enqueue(BackupItem(libraryID:library,localAssetIdentifier:"generated-\(i)",mediaType:"test"))
+   if [999,9999,99999].contains(i){let elapsed=Date().timeIntervalSince(start);let page=try await q.page(limit:100);XCTAssertEqual(page.count,100);let found=try await q.find(library:library,localID:"generated-\(i)");XCTAssertNotNil(found);print("Queue records \(i+1), cumulative seconds \(elapsed)")}
+  }
+  let summary=try await q.summary();XCTAssertEqual(summary[.queued],100000)
+ }
+ func testPermanentErrorDoesNotRapidRetryAndRetryLimitStops() async throws {
+  let(q,_,api,t,item,files,d)=try await fixture(bytes:100)
+  let e=BackupCoordinator(queue:q,api:api,transport:t,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files,retry:RetryPolicy(maximumAttempts:2));try await e.setNetwork(NetworkSnapshot())
+  await t.configure(fail:1);do{try await e.run(item.id)}catch{}
+  let first=try await q.read(item.id)!;XCTAssertEqual(first.state,.failedRetryable);XCTAssertNotNil(first.nextRetryAt)
+  try await e.run(item.id);let calls=await t.numbers;XCTAssertEqual(calls,[1])
+  var due=first;due.nextRetryAt=Date(timeIntervalSince1970:0);_=try await q.save(due);await t.configure(fail:1);do{try await e.run(item.id)}catch{}
+  let permanent=try await q.read(item.id);XCTAssertEqual(permanent?.state,.failedPermanent);try await e.run(item.id);let final=await t.numbers;XCTAssertEqual(final,[1,1])
+ }
+ func testUploadedUnverifiedStartupNeedsNoLocalOriginal() async throws {
+  let(q,e,api,t,item,_,d)=try await fixture(bytes:100);await api.failVerification(true);do{try await e.run(item.id)}catch{}
+  try FileManager.default.removeItem(at:d.appendingPathComponent("source").appendingPathComponent(item.localAssetIdentifier+".bin"))
+  await api.failVerification(false);try await e.reconcileStartup();try await e.retryFailed(item.id);try await e.run(item.id)
+  let result=try await q.read(item.id);let transfers=await t.numbers;XCTAssertEqual(result?.state,.protected);XCTAssertEqual(transfers,[1])
+ }
+ func testOrphanTempCleanupOnlyManagedOpaqueFiles() async throws {
+  let(_,e,_,_,_,files,_)=try await fixture(bytes:100)
+  let orphan=files.url(UUID()),unrecognized=files.directory.appendingPathComponent("keep.txt");try Data([1]).write(to:orphan);try Data([1]).write(to:unrecognized)
+  try await e.reconcileStartup();XCTAssertFalse(FileManager.default.fileExists(atPath:orphan.path));XCTAssertTrue(FileManager.default.fileExists(atPath:unrecognized.path))
+ }
+ func testPartRecordReplacementIsIdempotentAndCrashSafe() async throws {
+  let(q,_,_,_,item,_,_)=try await fixture(bytes:100),parts=[CompletedPart(partNumber:1,sizeBytes:100)]
+  try await q.replaceParts(item.id,parts:parts);try await q.replaceParts(item.id,parts:parts);let actual=try await q.parts(item.id);XCTAssertEqual(actual,parts)
+  do{try await q.replaceParts(item.id,parts:parts+parts);XCTFail()}catch{};let after=try await q.parts(item.id);XCTAssertEqual(after,parts)
+ }
+ #if os(macOS)
+ func testQueuePersistenceAcrossActualProcesses() async throws {
+  if let path=ProcessInfo.processInfo.environment["BACKUP_QUEUE_PROCESS_FIXTURE"],let stage=ProcessInfo.processInfo.environment["BACKUP_QUEUE_PROCESS_STAGE"] {
+   let q=try SQLiteBackupQueue(url:URL(fileURLWithPath:path))
+   if stage == "write" {
+    let item=BackupItem(libraryID:UUID(),localAssetIdentifier:"generated-process-metadata",mediaType:"test")
+    _=try await q.enqueue(item);var next=item;next.state = .paused;next.sessionID=UUID();next.expectedSizeBytes=100;_=try await q.save(next)
+    try await q.replaceParts(item.id,parts:[CompletedPart(partNumber:1,sizeBytes:100)])
+   } else {
+    let page=try await q.page();XCTAssertEqual(page.count,1);XCTAssertEqual(page.first?.state,.paused);XCTAssertNotNil(page.first?.sessionID)
+    let parts=try await q.parts(page[0].id);XCTAssertEqual(parts,[CompletedPart(partNumber:1,sizeBytes:100)])
+   }
+   return
+  }
+  let d=try directory(),path=d.appendingPathComponent("queue.sqlite").path
+  for stage in ["write","read"] {
+   let p=Process();p.executableURL=URL(fileURLWithPath:CommandLine.arguments[0]);if CommandLine.arguments[0].hasSuffix("/xctest") {p.arguments=["-XCTest","BackupEngineTests.BackupEngineTests/testQueuePersistenceAcrossActualProcesses",Bundle(for:BackupEngineTests.self).bundlePath]}else{p.arguments=["BackupEngineTests.BackupEngineTests/testQueuePersistenceAcrossActualProcesses"]}
+   var env=ProcessInfo.processInfo.environment;env["BACKUP_QUEUE_PROCESS_FIXTURE"]=path;env["BACKUP_QUEUE_PROCESS_STAGE"]=stage;p.environment=env
+   let output=Pipe();p.standardOutput=output;p.standardError=output;try p.run();let data=output.fileHandleForReading.readDataToEndOfFile();p.waitUntilExit()
+   XCTAssertEqual(p.terminationStatus,0,"Generated child queue process failed (\(data.count) captured diagnostic bytes).")
+  }
+ }
+ #endif
+
+ func testIntentionalRemovalPreservesProtectionAndPreventsReupload() async throws {
+  let(q,e,_,_,item,_,_)=try await fixture(bytes:5);try await e.run(item.id)
+  let protected=try await q.read(item.id)!
+  try await q.recordLocalRemoval(item.id,assetID:protected.assetID!,size:5,checksum:protected.expectedChecksum!)
+  let removed=try await q.read(item.id);XCTAssertEqual(removed?.state,.protected);XCTAssertEqual(removed?.localRemovedAfterProtection,true)
+  let due=try await q.due();XCTAssertFalse(due.contains{$0.id==item.id})
+  let store=try SQLiteDiscoveredAssetStore(url:nil),checkpoint=try await store.begin(snapshotKey:"generated",total:1,authorization:.authorized)
+  let next=try await store.writeBatch([AssetMetadata(localAssetID:item.localAssetIdentifier,mediaType:.image)],checkpoint:checkpoint,nextOffset:1);try await store.finish(next);try await store.invalidateVisibility()
+  let asset=try await store.asset(localID:item.localAssetIdentifier)!,decision=try await BackupPlanner(queue:q).decision(asset,library:item.libraryID,policy:BackupPolicy(),network:NetworkSnapshot());XCTAssertEqual(decision,.intentionallyRemoved)
+  try await q.recordLocalRemoval(item.id,assetID:protected.assetID!,size:5,checksum:protected.expectedChecksum!,removed:false)
+  let restored=try await q.read(item.id);XCTAssertEqual(restored?.localRemovedAfterProtection,false);XCTAssertEqual(restored?.state,.protected)
+ }
+ func testUnprotectedItemCannotAcquireRemovalMarker() async throws {
+  let(q,_,_,_,item,_,_)=try await fixture(bytes:5)
+  do{try await q.recordLocalRemoval(item.id,assetID:UUID(),size:5,checksum:String(repeating:"a",count:64));XCTFail()}catch{}
+ }
+ func testOrdinaryQueueWriteCannotFabricateRemovalMarker() async throws {
+  let(q,_,_,_,item,_,_)=try await fixture(bytes:5);var forged=try await q.read(item.id)!;forged.localRemovedAfterProtection=true
+  do{_=try await q.save(forged);XCTFail()}catch{}
+ }
+
+ func testPlannerUsesDiscoveryAndRequiresExplicitDevelopmentEnablement() async throws {
+  let store=try SQLiteDiscoveredAssetStore(url:nil),local="generated-planner-metadata",lib=UUID()
+  let checkpoint=try await store.begin(snapshotKey:"mock",total:1,authorization:.authorized)
+  let next=try await store.writeBatch([AssetMetadata(localAssetID:local,mediaType:.image)],checkpoint:checkpoint,nextOffset:1);try await store.finish(next)
+  let asset=try await store.asset(localID:local)!,q=try SQLiteBackupQueue(url:directory().appendingPathComponent("queue.sqlite")),planner=BackupPlanner(queue:q)
+  let initial=try await planner.decision(asset,library:lib,policy:BackupPolicy(),network:NetworkSnapshot());XCTAssertEqual(initial,.needsBackup)
+  do{_=try await planner.enqueueExplicit(asset,library:lib,developmentEnabled:false);XCTFail()}catch{}
+  let id=try await planner.enqueueExplicit(asset,library:lib,developmentEnabled:true)
+  let queued=try await planner.decision(asset,library:lib,policy:BackupPolicy(),network:NetworkSnapshot());XCTAssertEqual(queued,.alreadyQueued)
+  var waiting=try await q.read(id)!;waiting.state = .paused;waiting.lastErrorCode="WAITING_FOR_ICLOUD_ORIGINAL";_=try await q.save(waiting)
+  let decision=try await planner.decision(asset,library:lib,policy:BackupPolicy(),network:NetworkSnapshot());XCTAssertEqual(decision,.waitingForResource)
+  try await store.invalidateVisibility();let removed=try await store.asset(localID:local)!
+  let inaccessible=try await planner.decision(removed,library:UUID(),policy:BackupPolicy(),network:NetworkSnapshot());XCTAssertEqual(inaccessible,.inaccessible)
+  let retained=try await q.read(id);XCTAssertNotNil(retained) // Losing local access never cancels/deletes backup work.
+ }
+
+ func testPartAuthorizationTreatsHostnameCaseInsensitively() throws {
+  let d=try directory(),url=d.appendingPathComponent("generated.bin");try Data("hello".utf8).write(to:url)
+  let resource=try StreamingIntegrity.inspect(url),transport=try PartURLSessionTransport(origin:URL(string:"http://Moronkes-MacBook-Pro.local:9000")!,allowLocalHTTP:true)
+  for (host,port,allowed) in [("moronkes-macbook-pro.local",9000,true),("other.local",9000,false),("moronkes-macbook-pro.local",9001,false)] {
+   let a=try JSONDecoder().decode(UploadAuthorization.self,from:JSONSerialization.data(withJSONObject:["method":"PUT","url":"http://\(host):\(port)/generated","headers":["content-length":"5"],"expiresAt":"2099-01-01T00:00:00.000Z"]))
+   if allowed {XCTAssertNoThrow(try transport.validateAuthorization(resource:resource,authorization:a))}
+   else {XCTAssertThrowsError(try transport.validateAuthorization(resource:resource,authorization:a))}
+  }
+ }
+
+ func testProviderAgnosticPartHeadersWithoutNativeChecksumRemainValid() throws {
+  let d=try directory(),url=d.appendingPathComponent("generated.bin");try Data("hello".utf8).write(to:url)
+  let resource=try StreamingIntegrity.inspect(url),transport=try PartURLSessionTransport(origin:URL(string:"https://storage.example.invalid")!)
+  let a=try JSONDecoder().decode(UploadAuthorization.self,from:JSONSerialization.data(withJSONObject:["method":"PUT","url":"https://storage.example.invalid/generated","headers":["content-length":"5"],"expiresAt":"2099-01-01T00:00:00.000Z"]))
+  XCTAssertNoThrow(try transport.validateAuthorization(resource:resource,authorization:a))
+ }
+
+ func testPartTransportRejectsUnsafeAuthorizationBeforeNetworkingAndShutsDown() async throws {
+  let d=try directory(),url=d.appendingPathComponent("generated.bin");try Data("hello".utf8).write(to:url)
+  let resource=try StreamingIntegrity.inspect(url),transport=try PartURLSessionTransport(origin:URL(string:"https://storage.example.invalid")!)
+  let headers=["content-length":"5","x-amz-checksum-sha256":Data(SHA256.hash(data:Data("hello".utf8))).base64EncodedString()]
+  for variation in 0..<6 {
+   var h=headers;var origin="https://storage.example.invalid/object";var expiry="2099-01-01T00:00:00.000Z";var method="PUT"
+   switch variation{case 0:origin="https://other.example.invalid/object";case 1:expiry="2000-01-01T00:00:00.000Z";case 2:h["Authorization"]="fixture";case 3:h["content-length"]="6";case 4:h["x-amz-checksum-sha256"]="invalid";default:method="GET"}
+   let auth=try JSONDecoder().decode(UploadAuthorization.self,from:JSONSerialization.data(withJSONObject:["method":method,"url":origin,"headers":h,"expiresAt":expiry]))
+   do{try await transport.upload(item:UUID(),number:1,resource:resource,authorization:auth,policy:BackupPolicy());XCTFail()}catch{XCTAssertEqual(error as? BackupFailure,.authorization)}
+  }
+  await transport.shutdown()
+ }
+
+ func testPauseActiveTransferAndResumeKeepsPartsSafe() async throws {
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=BlockingTransport()
+  let e=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files);try await e.setNetwork(NetworkSnapshot())
+  let task=Task{try await e.run(item.id)};while !(await transport.started){try await Task.sleep(for:.milliseconds(1))}
+  try await e.pause(item.id);try await task.value;let paused=try await q.read(item.id);XCTAssertEqual(paused?.state,.paused)
+  try await e.resume(item.id);let resumed=try await q.read(item.id);XCTAssertEqual(resumed?.state,.queued)
+ }
+ func testNetworkChangeCancelsActiveTransferSafely() async throws {
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=BlockingTransport()
+  let e=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files);try await e.setNetwork(NetworkSnapshot())
+  let task=Task{try await e.run(item.id)};while !(await transport.started){try await Task.sleep(for:.milliseconds(1))}
+  try await e.setNetwork(NetworkSnapshot(cellular:true,wifi:false));try await task.value;let paused=try await q.read(item.id);XCTAssertEqual(paused?.state,.paused);XCTAssertEqual(paused?.lastErrorCode,"NETWORK_POLICY")
+ }
+ func testCancellationOfActiveTransferIsDurableAndServerNotified() async throws {
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=BlockingTransport()
+  let e=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files);try await e.setNetwork(NetworkSnapshot())
+  let task=Task{try await e.run(item.id)};while !(await transport.started){try await Task.sleep(for:.milliseconds(1))}
+  try await e.cancel(item.id);try await task.value;let cancelled=try await q.read(item.id);XCTAssertEqual(cancelled?.state,.cancelled);XCTAssertEqual(cancelled?.cancellationPending,false);let remote=await api.cancelled;XCTAssertTrue(remote)
+ }
+
+}
+
+private actor BlockingTransport:PartTransport {
+ var started=false
+ var continuation:CheckedContinuation<Void,Error>?
+ func upload(item:UUID,number:Int,resource:PreparedResource,authorization:UploadAuthorization,policy:BackupPolicy) async throws {
+  try await withCheckedThrowingContinuation{(c:CheckedContinuation<Void,Error>) in continuation=c;started=true}
+ }
+ func cancel(item:UUID){let c=continuation;continuation=nil;c?.resume(throwing:CancellationError())}
+}
+
+final class DevelopmentOriginTests: XCTestCase {
+ func testLocalHostnameRequiresDevelopmentOptIn() throws {
+  let local=URL(string:"http://mac.local:9000")!
+  XCTAssertNoThrow(try PartURLSessionTransport(origin:local,allowLocalHTTP:true))
+  XCTAssertThrowsError(try PartURLSessionTransport(origin:local))
+  XCTAssertThrowsError(try PartURLSessionTransport(origin:URL(string:"http://mac.local.attacker.invalid:9000")!,allowLocalHTTP:true))
+  XCTAssertThrowsError(try PartURLSessionTransport(origin:URL(string:"http://user:password@mac.local:9000")!,allowLocalHTTP:true))
+ }
+}

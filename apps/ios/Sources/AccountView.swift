@@ -10,7 +10,7 @@ struct AccountView: View {
     @State private var busy = false
     private let deviceIdentifier: String
     init() {
-        if let value = Bundle.main.object(forInfoDictionaryKey: "APIBaseURL") as? String, let url = URL(string: value) {
+        if BetaReleaseSafety.acceptedConfiguration, let value = Bundle.main.object(forInfoDictionaryKey: "APIBaseURL") as? String, let url = URL(string: value) {
             api = AuthAPI(baseURL: url, store: KeychainSessionStore(service: (Bundle.main.bundleIdentifier ?? "com.example.backupclient") + ".session"))
         } else { api = nil }
         // This is non-secret device metadata; authentication tokens use Keychain only.
@@ -41,6 +41,8 @@ struct AccountView: View {
     @MainActor private func signIn() async {
         guard let api else { message = "API configuration unavailable."; return }
         busy = true; defer { busy = false }
+        await RestoreModel.shared.invalidate()
+        await StorageScreen.model.invalidate()
         do { account = try await api.login(email: email, password: password, deviceIdentifier: deviceIdentifier); password = ""; message = "" }
         catch { message = "Unable to sign in. Check your credentials or connection." }
     }
@@ -53,7 +55,9 @@ struct AccountView: View {
     @MainActor private func signOut() async {
         guard let api else { return }
         busy = true; defer { busy = false }
-        do { try await api.logout(); account = nil; message = "Signed out." }
+        await RestoreModel.shared.invalidate()
+        await StorageScreen.model.invalidate()
+        do { try await BackupQueueModel.shared.stopForSignOut(); try await api.logout(); account = nil; message = "Signed out." }
         catch { message = "Sign out could not be confirmed. Retry when connected." }
     }
 }

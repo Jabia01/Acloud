@@ -11,9 +11,11 @@ final class AuthProtocol: URLProtocol {
     static var body = ""
     static var status = 200
     static var authorization: String?
+    static var path: String?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        Self.path = request.url?.path
         Self.authorization = request.value(forHTTPHeaderField: "Authorization")
         let response = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -40,6 +42,38 @@ final class AuthAPITests: XCTestCase {
         AuthProtocol.body = "{\"sessionToken\":\"\(raw)\",\"user\":\(AuthProtocol.body)}"
         let account = try await api.login(email: "fixture@example.invalid", password: UUID().uuidString, deviceIdentifier: UUID().uuidString)
         XCTAssertEqual(store.value, raw); XCTAssertEqual(account.email, "fixture@example.invalid"); XCTAssertNil(AuthProtocol.authorization)
+    }
+    func testPrivateRestoreScopeRequiresExplicitModeAndBoundedIDs() async throws {
+        store.value = String(repeating: "y", count: 43)
+        let id = UUID()
+        AuthProtocol.body = "{\"RESTORE_BETA_ACCEPTED\":false,\"OWNER_DEVICE_TEST\":true,\"OWNER_DEVICE_TEST_ASSET_IDS\":[\"\(id.uuidString)\"]}"
+        let accepted = try await api.ownerDeviceTestRestoreAssets()
+        XCTAssertEqual(accepted, [id])
+        XCTAssertEqual(AuthProtocol.path, "/restore/status")
+        AuthProtocol.body = "{\"OWNER_DEVICE_TEST_ASSET_IDS\":[\"\(id.uuidString)\"]}"
+        let missingMode = try await api.ownerDeviceTestRestoreAssets()
+        XCTAssertNil(missingMode)
+        AuthProtocol.body = "{\"OWNER_DEVICE_TEST\":true,\"OWNER_DEVICE_TEST_ASSET_IDS\":[]}"
+        let empty = try await api.ownerDeviceTestRestoreAssets()
+        XCTAssertEqual(empty, [])
+        AuthProtocol.body = "{\"OWNER_DEVICE_TEST\":true,\"OWNER_DEVICE_TEST_ASSET_IDS\":[\"\(id.uuidString)\",\"\(id.uuidString)\",\"\(id.uuidString)\"]}"
+        let tooMany = try await api.ownerDeviceTestRestoreAssets()
+        XCTAssertNil(tooMany)
+    }
+    func testCurrentDeviceUsesAuthenticatedSessionsRoute() async throws {
+        store.value = String(repeating:"y",count:43)
+        let device=UUID()
+        AuthProtocol.body="[{\"current\":false,\"deviceId\":\"\(UUID().uuidString)\"},{\"current\":true,\"deviceId\":\"\(device.uuidString)\"}]"
+        let actual=try await api.currentDeviceID()
+        XCTAssertEqual(actual,device)
+        XCTAssertEqual(AuthProtocol.path,"/sessions")
+        XCTAssertEqual(AuthProtocol.authorization,"Bearer \(store.value!)")
+    }
+    func testCurrentDeviceRejectsUnboundCurrentSession() async throws {
+        store.value = String(repeating:"y",count:43)
+        AuthProtocol.body="[{\"current\":false,\"deviceId\":\"\(UUID().uuidString)\"},{\"current\":true,\"deviceId\":null}]"
+        do { _ = try await api.currentDeviceID();XCTFail("Unbound session must not use another device") }
+        catch { XCTAssertNotNil(store.value) }
     }
     func testAuthenticatedMeUsesBearer() async throws {
         store.value = String(repeating: "y", count: 43)
