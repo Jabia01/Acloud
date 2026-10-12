@@ -9,6 +9,7 @@ import {migrate} from '../../../scripts/migrate.mjs';
 const require=createRequire(import.meta.url);
 const {DatabaseService}=require('../dist/database.service.js');
 const {BetaPolicy}=require('../dist/beta/policy.js');
+const {BetaRequestGuard}=require('../dist/beta/module.js');
 const {UploadService}=require('../dist/uploads/upload.service.js');
 const {RestoreService}=require('../dist/restore/service.js');
 const {ObjectStorageProvider}=require('../dist/uploads/storage.js');
@@ -58,6 +59,38 @@ describe('private owner device staging mode',{concurrency:false},()=>{
  test('unverified and abuse-reviewed accounts denied',async()=>{await pool.query('UPDATE users SET email_verified_at=NULL WHERE id=$1',[p.userId]);await assert.rejects(uploads.create(p,input(),randomUUID()));await pool.query('UPDATE users SET email_verified_at=now(),abuse_review=true WHERE id=$1',[p.userId]);await assert.rejects(uploads.create(p,input(),randomUUID()));});
  test('file size, single upload and spoofed device denied',async()=>{for(const patch of [{size:33554433},{multipart:false},{deviceId:randomUUID()}])await assert.rejects(uploads.create(p,{...input(),...patch},randomUUID()));});
  test('concurrent reservations cap at two and preserve quota',async()=>{const results=await Promise.allSettled(Array.from({length:5},()=>uploads.create(p,input(33554432),randomUUID())));assert.equal(results.filter(r=>r.status==='fulfilled').length,2);assert.equal(Number((await pool.query('SELECT reserved_bytes FROM development_entitlements WHERE user_id=$1',[p.userId])).rows[0].reserved_bytes),67108864);});
+ test('global request guard admits only the bound live owner session',async()=>{
+  const token='x'.repeat(43);const {createHash}=await import('node:crypto');
+  await pool.query('UPDATE sessions SET token_hash=$2 WHERE id=$1',[p.sessionId,createHash('sha256').update(token).digest('hex')]);
+  const guard=new BetaRequestGuard(policy,db);
+  const ctx=(path='/uploads',authorization='Bearer '+token)=>({switchToHttp:()=>({getRequest:()=>({method:'POST',path,headers:{authorization}})})});
+  assert.equal(await guard.canActivate(ctx()),true);
+  const {Controller,Post,Module}=require('@nestjs/common');const {NestFactory,APP_GUARD}=require('@nestjs/core');
+  class ProbeController{create(){return {admitted:true};}}
+  Controller('uploads')(ProbeController);Post()(ProbeController.prototype,'create',Object.getOwnPropertyDescriptor(ProbeController.prototype,'create'));
+  class ProbeModule{};Module({controllers:[ProbeController],providers:[{provide:APP_GUARD,useValue:guard}]})(ProbeModule);
+  const app=await NestFactory.create(ProbeModule,{logger:false});
+  try{await app.listen(0,'127.0.0.1');const url=await app.getUrl();
+   assert.equal((await fetch(url+'/uploads',{method:'POST',headers:{authorization:'Bearer '+token}})).status,201);
+   assert.equal((await fetch(url+'/uploads',{method:'POST'})).status,403);
+   const old=process.env.OWNER_DEVICE_TEST_ACCOUNT_ID;process.env.OWNER_DEVICE_TEST_ACCOUNT_ID=randomUUID();
+   try{assert.equal((await fetch(url+'/uploads',{method:'POST',headers:{authorization:'Bearer '+token}})).status,403);}finally{process.env.OWNER_DEVICE_TEST_ACCOUNT_ID=old;}
+  }finally{await app.close();}
+
+  assert.equal(await guard.canActivate(ctx('/uploads/'+randomUUID()+'/multipart')),true);
+  await assert.rejects(guard.canActivate(ctx('/billing/checkout')));
+  await assert.rejects(guard.canActivate(ctx('/storage/free-up-space')));
+  await assert.rejects(guard.canActivate(ctx('/uploads','')));
+  await assert.rejects(guard.canActivate(ctx('/uploads','Bearer '+'y'.repeat(43))));
+  process.env.OWNER_DEVICE_TEST_DEVICE_ID=randomUUID();await assert.rejects(guard.canActivate(ctx()));process.env.OWNER_DEVICE_TEST_DEVICE_ID=p.deviceId;
+  await pool.query("UPDATE beta_switches SET blocked=true WHERE name='multipart'");await assert.rejects(guard.canActivate(ctx()));await pool.query("UPDATE beta_switches SET blocked=false WHERE name='multipart'");
+  await pool.query('UPDATE sessions SET revoked_at=now() WHERE id=$1',[p.sessionId]);await assert.rejects(guard.canActivate(ctx()));
+ });
+ test('global request guard keeps uploads closed with owner mode off',async()=>{
+  process.env.OWNER_DEVICE_TEST_ENABLED='false';
+  const guard=new BetaRequestGuard(policy,db);
+  await assert.rejects(guard.canActivate({switchToHttp:()=>({getRequest:()=>({method:'POST',path:'/uploads',headers:{}})})}));
+ });
  test('native multipart request binds omitted device to authenticated iPad',async()=>{const r=await uploads.create(p,{...input(),deviceId:null},randomUUID());assert.equal((await pool.query('SELECT device_id FROM assets WHERE id=$1',[r.assetId])).rows[0].device_id,p.deviceId);});
  test('ordinary quota remains enforced',async()=>{await pool.query('UPDATE entitlements SET quota_bytes=10 WHERE user_id=$1',[p.userId]);await assert.rejects(uploads.create(p,input(),randomUUID()));});
  test('idempotency retry does not spend a second slot; cancelled attempts still count',async()=>{const key=randomUUID(),a=await uploads.create(p,input(),key);assert.equal((await uploads.create(p,input(),key)).id,a.id);await uploads.create(p,input(),randomUUID());await uploads.cancel(p,a.id);await assert.rejects(uploads.create(p,input(),randomUUID()));});
