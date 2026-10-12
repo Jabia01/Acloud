@@ -43,6 +43,6 @@ macOS package tests cannot establish PhotoKit behavior, iOS background execution
 
 ## Release status
 
-Version 0.1.0/build 12. Draft icon exists but requires approval. A signed archive, reviewed privacy manifest/disclosures, Release admission and internal TestFlight acceptance remain pending. The user confirmed no paid Apple Developer membership on 12 October; enrollment is needed before TestFlight distribution. See [TestFlight preparation](../../docs/TESTFLIGHT_BETA.md) and [acceptance](../../docs/TESTFLIGHT_ACCEPTANCE.md).
+Version 0.1.0/build 12. Draft icon exists but requires approval. A privacy manifest and engineering disclosure mapping are now prepared; final operator/retention/provider review and the signed archive, Release admission and TestFlight acceptance remain pending. See [privacy review](../../docs/IOS_PRIVACY_REVIEW.md). The user confirmed no paid Apple Developer membership on 12 October; enrollment is needed before TestFlight distribution. See [TestFlight preparation](../../docs/TESTFLIGHT_BETA.md) and [acceptance](../../docs/TESTFLIGHT_ACCEPTANCE.md).
 
 Do not infer PROTECTED from uploaded bytes: only server verification grants protection. Authentication tokens use Keychain, not UserDefaults. Local library/device identifiers are non-secret metadata. Restore writes only explicitly selected verified items. Destructive operations require separate authorization and acceptance.

@@ -35,8 +35,6 @@ settings:
       STORAGE_ORIGIN: $(BETA_STORAGE_ORIGIN)
       PRODUCT_BUNDLE_IDENTIFIER: $(BETA_BUNDLE_IDENTIFIER)
       DEVELOPMENT_TEAM: $(BETA_DEVELOPMENT_TEAM)
-      INFOPLIST_FILE: Configuration/Info-Beta.plist
-      GENERATE_INFOPLIST_FILE: NO
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
       MARKETING_VERSION: 0.1.0
       CURRENT_PROJECT_VERSION: 12
@@ -45,7 +43,11 @@ targets:
   BackupClient:
     type: application
     platform: iOS
-    sources: [Sources, Assets.xcassets]
+    sources:
+      - Sources
+      - Assets.xcassets
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: HealthClient
       - package: PhotoDiscovery
@@ -57,6 +59,11 @@ targets:
       - package: MediaPreservation
       - package: RestoreEngine
       - package: LocalStorageManagement
+    settings:
+      configs:
+        Release:
+          INFOPLIST_FILE: Configuration/Info-Beta.plist
+          GENERATE_INFOPLIST_FILE: NO
     configFiles:
       Release: Configuration/Beta.xcconfig
     info:
