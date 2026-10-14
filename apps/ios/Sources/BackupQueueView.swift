@@ -6,6 +6,39 @@ import HealthClient
 import Photos
 import PhotosUI
 
+private extension BackupState {
+ var displayTitle:String {
+  switch self {
+  case .discovered: return "Ready to back up"
+  case .queued: return "Waiting to start"
+  case .preparing: return "Preparing original"
+  case .uploading: return "Backing up"
+  case .uploaded, .verifying: return "Checking backup"
+  case .protected: return "Protected"
+  case .paused: return "Paused"
+  case .failedRetryable: return "Backup interrupted"
+  case .failedPermanent: return "Backup needs attention"
+  case .cancelled: return "Cancelled"
+  }
+ }
+}
+
+private func backupGuidance(_ item:BackupItem)->String? {
+ if item.lastErrorCode == "WAITING_FOR_ICLOUD_ORIGINAL" { return "This original is in iCloud. Allow downloads over Wi-Fi, then resume. Your original stays in Photos." }
+ if item.lastErrorCode == "SESSION_EXPIRED" { return "Sign in again from Account, then retry this backup." }
+ if item.lastErrorCode == "HTTP_503" { return "Acloud is temporarily unavailable. Keep your original and retry later." }
+ if item.lastErrorCode == "HTTP_403" { return "This backup request was not allowed. Check your account access or contact support." }
+ if item.lastErrorCode == "HTTP_409" { return "Acloud could not accept this backup in its current state. Retry once; contact support if it continues." }
+ switch item.state {
+ case .failedRetryable: return "The backup has not been verified. Keep your original and retry when your connection is available."
+ case .failedPermanent: return "The backup could not finish. Keep your original. You can retry or contact support."
+ case .uploaded, .verifying: return "Upload received. Keep your original while Acloud checks the stored file."
+ case .protected: return "Acloud verified the stored file. Keep your original during beta testing."
+ case .cancelled: return "This transfer was cancelled. Your original remains in Photos."
+ default: return nil
+ }
+}
+
 #if DEBUG
 @MainActor private final class BackupBackgroundTime {
  private var identifier:UIBackgroundTaskIdentifier = .invalid
@@ -113,7 +146,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    message="Private staging test: at most two disposable items, 32 MB each. Keep originals. This is not beta release approval."
   }
   #else
-  message="Choose assets explicitly. Each required original resource is verified separately. Keep originals; complex Photos fidelity acceptance remains pending."
+  message="Choose photos or videos to back up. Keep your originals during beta testing. Support for Live Photos, RAW and edits is still being validated."
   #endif
  }
  func refresh() async {
@@ -209,7 +242,7 @@ Section("Single-item development test") {
  var body:some View {
   NavigationStack{List{
    Section("Backup Queue"){
-    ForEach(BackupState.allCases,id:\.self){state in if let count=model.summary[state],count>0{Text("\(count) \(state.rawValue.lowercased())")}}
+    ForEach(BackupState.allCases,id:\.self){state in if let count=model.summary[state],count>0{Text("\(count) · \(state.displayTitle)")}}
     Text(model.message).font(.footnote)
    }
    #if DEBUG
@@ -225,9 +258,9 @@ Section("Single-item development test") {
     Button("Retry Failed"){Task{await model.retryFailed()}}
    }.disabled(model.busy)
    #endif
-   Section("Complete media preservation"){ForEach(model.manifests){manifest in VStack(alignment:.leading){Text(manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media");Text(manifest.state == .fullyProtected ? "Required resources protected":manifest.state == .sourceChanged ? "Source changed — recapture required":"Preservation incomplete or awaiting verification");Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required resources protected").font(.caption);Text("Photos reconstruction and cleanup require format-specific device acceptance.").font(.caption)}}}
-   Section("First 100 Items"){
-    ForEach(model.items){item in VStack(alignment:.leading){Text(item.state.rawValue);if item.lastErrorCode=="WAITING_FOR_ICLOUD_ORIGINAL"{Text("Original requires an iCloud download. Allow Wi-Fi downloads, then resume.").font(.caption)};Text("\(item.bytesUploaded) bytes transferred").font(.caption);if let code=item.lastErrorCode,item.state != .protected{Text("Diagnostic: \(code)").font(.caption).textSelection(.enabled)}
+   Section("Backup completeness"){ForEach(model.manifests){manifest in VStack(alignment:.leading){Text(manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media");Text(manifest.state == .fullyProtected ? "Required resources protected":manifest.state == .sourceChanged ? "Source changed — recapture required":"Preservation incomplete or awaiting verification");Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required resources protected").font(.caption);Text("Restoring this format and removing device copies are not yet approved for beta use.").font(.caption)}}}
+   Section("Recent transfers (up to 100)"){
+    ForEach(model.items){item in VStack(alignment:.leading){Text("\(item.mediaType == "video" ? "Video" : item.mediaType == "image" ? "Photo" : "Test file") · \(item.state.displayTitle)");if let guidance=backupGuidance(item){Text(guidance).font(.caption)};Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) transferred").font(.caption);if let code=item.lastErrorCode,item.state != .protected{DisclosureGroup("Support details"){Text(code).font(.caption).textSelection(.enabled)}}
      HStack{Button("Pause"){Task{await model.pause(item.id)}};if [.failedPermanent,.failedRetryable].contains(item.state){Button("Retry"){Task{await model.retry(item.id)}}}else{Button("Resume"){Task{await model.resume(item.id)}}};Button("Cancel"){Task{await model.cancel(item.id)}}}.buttonStyle(.borderless).disabled(item.state == .protected)
     }}
    }

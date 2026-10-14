@@ -30,3 +30,14 @@ button:disabled { opacity:.55; cursor:default; }
 dt { font-weight:600; } dd { margin:0 0 1rem; }
 @media(max-width:500px) { .control { padding:0 1rem; } .site-header { padding:1rem; } .cards,.asset-grid { grid-template-columns:1fr; } }
 .table-scroll { overflow:auto; max-width:100%; } table { border-collapse:collapse; width:100%; } th,td { text-align:left; padding:.6rem; border-bottom:1px solid #cbd5db; vertical-align:top; overflow-wrap:anywhere; } select { padding:.6rem; max-width:100%; } .confirmation { margin:1rem 0; }
+
+/* Beta usability: readable account sections and help without changing feature gates. */
+.plan-summary,.support-footer { max-width:72rem; margin:1.5rem auto; padding:0 1.5rem; box-sizing:border-box; }
+.plan-summary h2 { font-size:1rem; margin-bottom:.3rem; }
+.support-footer { border-top:1px solid #dce3e7; padding-top:1rem; overflow-wrap:anywhere; }
+.support-footer h2 { font-size:1.15rem; }
+.account-profile,.account-deletion,.empty-state { background:white; border:1px solid #dce3e7; border-radius:.7rem; padding:1.2rem; margin:1rem 0; }
+summary { cursor:pointer; font-weight:600; padding:.5rem 0; }
+input[type="checkbox"] { display:inline-block; width:auto; margin-right:.5rem; }
+button { min-height:44px; }
+.asset-grid details { margin:.6rem 0; }

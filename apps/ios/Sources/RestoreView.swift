@@ -3,6 +3,25 @@ import HealthClient
 import RestoreEngine
 import MediaPreservation
 import Photos
+
+private extension RestoreState {
+ var displayTitle:String {
+  switch self {
+  case .queued: return "Waiting to restore"
+  case .authorizing: return "Checking access"
+  case .downloading: return "Downloading"
+  case .verifying: return "Checking downloaded file"
+  case .ready: return "Ready to save"
+  case .saving: return "Saving to Photos"
+  case .restored: return "Restored to Photos"
+  case .paused: return "Paused"
+  case .retryable: return "Restore interrupted"
+  case .permanent: return "Restore needs attention"
+  case .cancelled: return "Cancelled"
+  case .reconcile: return "Check Photos before retrying"
+  }
+ }
+}
 @MainActor final class RestoreModel:ObservableObject {
  static let shared=RestoreModel()
  @Published var assets:[ProtectedRestoreAsset]=[]
@@ -70,13 +89,13 @@ struct RestoreView:View {
  @ObservedObject private var model=RestoreModel.shared
  @State private var confirmAnother=false
  var body:some View{NavigationStack{List{
-  Section("Restore protected versions"){Text(RestoreCopy.iCloudWarning).font(.footnote);Text("Restore creates a new Photos copy. Cloud protection and quota stay unchanged.").font(.footnote);Text(model.message);if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))")};Text("Selected \(model.selectedPhotos) photos, \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))")
+  Section("Restore your backups"){Text(RestoreCopy.iCloudWarning).font(.footnote);Text("Restore creates a new Photos copy. Cloud protection and quota stay unchanged.").font(.footnote);Text(model.message);if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))")};Text("Selected \(model.selectedPhotos) photos, \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))")
    Button("Allow Photos additions"){Task{await model.requestPermission()}}.disabled(!model.canRestore)
    Button("Restore selected to Photos"){Task{await model.enqueue()}}.disabled(model.selected.isEmpty||model.busy || !model.canRestore)
    Button("Restore another copy…"){confirmAnother=true}.disabled(model.selected.isEmpty || !model.canRestore)
   }
-  Section("Protected library page"){ForEach(model.assets){asset in Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{if $0{model.selected.insert(asset.id)}else{model.selected.remove(asset.id)}})){Text("Protected \(asset.mediaType) · \((asset.sizeBytes ?? 0).formatted(.byteCount(style:.file)))")}};Button("Refresh protected library"){Task{await model.loadAssets()}};if model.hasNextAssets{Button("Next protected page"){Task{await model.loadAssets(next:true)}}}}
-  Section("Multi-resource restore"){Text("Live Photos require both resources. Edited assets require an explicit original or rendered choice; adjustment recipes cannot be reapplied exactly.");ForEach(model.assets){a in HStack{Button("Restore original"){Task{await model.restoreVariant(a.id,choice:.original)}};Button("Restore rendered edit"){Task{await model.restoreVariant(a.id,choice:.edited)}}.disabled(!model.canRestore)}};ForEach(model.compounds){r in VStack{Text("\(r.plan.manifest.kind.rawValue) · \(r.state.rawValue) · \(r.plan.resources.count) resources");if ![.restored,.saving,.reconcile,.cancelled].contains(r.state){HStack{Button("Pause"){Task{await model.compoundControl(r,"pause")}};Button("Retry"){Task{await model.compoundControl(r,"resume")}};Button("Cancel"){Task{await model.compoundControl(r,"cancel")}}}.buttonStyle(.borderless)}}}}
-  Section("Restore history / queue"){ForEach(model.items){item in VStack(alignment:.leading){Text(item.state.rawValue);Text("\((model.progress[item.id] ?? item.bytesDownloaded).formatted(.byteCount(style:.file))) / \(item.evidence.expectedSize.formatted(.byteCount(style:.file)))").font(.caption);if let code=item.lastErrorCode{Text(code.hasPrefix("PHOTOS_SAVE_ERROR_") ? "Photos reported a save error (code \(code.dropFirst(18))). This copy is unconfirmed; review before restoring again.":code=="SAVE_RESULT_UNCERTAIN" ? "Photos may already contain this copy. Review before restoring again.":code=="INTEGRITY_FAILED" ? "Downloaded bytes failed integrity checks.":code=="PHOTOS_PERMISSION_REQUIRED" ? "Allow Photos additions to continue.":"Restore paused or requires a retry.").font(.caption)};if ![.restored,.saving,.reconcile,.cancelled].contains(item.state){HStack{Button("Pause"){Task{await model.control(item,"pause")}};Button("Resume / Retry"){Task{await model.control(item,"resume")}};Button("Cancel"){Task{await model.control(item,"cancel")}}}.buttonStyle(.borderless)}}};Button("Next queue page"){Task{await model.refresh(next:true)}}}
+  Section("Choose items to restore"){ForEach(model.assets){asset in Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{if $0{model.selected.insert(asset.id)}else{model.selected.remove(asset.id)}})){Text("Protected \(asset.mediaType) · \((asset.sizeBytes ?? 0).formatted(.byteCount(style:.file)))")}};Button("Refresh protected library"){Task{await model.loadAssets()}};if model.hasNextAssets{Button("Next protected page"){Task{await model.loadAssets(next:true)}}}}
+  Section("Live Photos and edited media"){Text("Live Photos require both resources. Edited assets require an explicit original or rendered choice; adjustment recipes cannot be reapplied exactly.");ForEach(model.assets){a in HStack{Button("Restore original"){Task{await model.restoreVariant(a.id,choice:.original)}};Button("Restore rendered edit"){Task{await model.restoreVariant(a.id,choice:.edited)}}.disabled(!model.canRestore)}};ForEach(model.compounds){r in VStack{Text("\(r.plan.manifest.kind.rawValue) · \(r.state.rawValue) · \(r.plan.resources.count) resources");if ![.restored,.saving,.reconcile,.cancelled].contains(r.state){HStack{Button("Pause"){Task{await model.compoundControl(r,"pause")}};Button("Retry"){Task{await model.compoundControl(r,"resume")}};Button("Cancel"){Task{await model.compoundControl(r,"cancel")}}}.buttonStyle(.borderless)}}}}
+  Section("Restore progress"){ForEach(model.items){item in VStack(alignment:.leading){Text(item.state.displayTitle);Text("\((model.progress[item.id] ?? item.bytesDownloaded).formatted(.byteCount(style:.file))) / \(item.evidence.expectedSize.formatted(.byteCount(style:.file)))").font(.caption);if let code=item.lastErrorCode{Text(code.hasPrefix("PHOTOS_SAVE_ERROR_") ? "Photos reported a save error (code \(code.dropFirst(18))). This copy is unconfirmed; review before restoring again.":code=="SAVE_RESULT_UNCERTAIN" ? "Photos may already contain this copy. Review before restoring again.":code=="INTEGRITY_FAILED" ? "Downloaded bytes failed integrity checks.":code=="PHOTOS_PERMISSION_REQUIRED" ? "Allow Photos additions to continue.":"Restore paused or requires a retry.").font(.caption)};if ![.restored,.saving,.reconcile,.cancelled].contains(item.state){HStack{Button("Pause"){Task{await model.control(item,"pause")}};Button("Resume / Retry"){Task{await model.control(item,"resume")}};Button("Cancel"){Task{await model.control(item,"cancel")}}}.buttonStyle(.borderless)}}};Button("Next queue page"){Task{await model.refresh(next:true)}}}
  }.navigationTitle("Restore")}.confirmationDialog("Create another Photos copy?",isPresented:$confirmAnother,titleVisibility:.visible){Button("Restore another copy"){Task{await model.enqueue(again:true)}}}message:{Text("A previous or uncertain restore may already exist. This creates another copy and never removes existing Photos items.")}.task{await model.loadAssets();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}}
 }

@@ -21,7 +21,7 @@ struct AccountView: View {
     var body: some View {
         Form {
             if let account {
-                Section("Signed In / Account Status") {
+                Section("Your account") {
                     Text(account.email)
                     Text(account.emailVerified ? "Email verified" : "Email unverified")
                     Button("Sign Out") { Task { await signOut() } }.disabled(busy)
@@ -32,8 +32,13 @@ struct AccountView: View {
                     SecureField("Password", text: $password).textContentType(.password)
                     Button("Sign In") { Task { await signIn() } }.disabled(busy)
                     Button("Create Account") { Task { await register() } }.disabled(busy)
-                    Text("New passwords require at least 12 characters. Verification and recovery links open on the development website.").font(.footnote)
+                    Text("New passwords require at least 12 characters. Verification and recovery links open on the Acloud website.").font(.footnote)
                 }
+            }
+            Section("Help") {
+                Link("Contact support", destination: URL(string:"mailto:Support247.acloud@useacloud.com")!)
+                Link("Privacy requests", destination: URL(string:"mailto:Privacy247.acloud@useacloud.com")!)
+                Text("Never send passwords, verification codes or private photos. Staging support contact delivery is still being verified.").font(.footnote)
             }
             if !message.isEmpty { Text(message).accessibilityLabel(message) }
         }.task { if let api { account = try? await api.me() } }
