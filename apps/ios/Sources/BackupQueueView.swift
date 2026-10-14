@@ -265,12 +265,12 @@ struct BackupQueueView:View {
        Text("Choose a photo or video above. Its progress and verified backup status will appear here.").foregroundStyle(.secondary)
       }.padding(.vertical,12)
      }
-     ForEach(model.items) { item in
+     ForEach(Array(model.items.enumerated()),id:\.element.id) { index,item in
       VStack(alignment:.leading,spacing:14) {
        HStack(spacing:14) {
         AcloudMediaIcon(video:item.mediaType == "video")
         VStack(alignment:.leading,spacing:5) {
-         Text(item.mediaType == "video" ? "Video" : item.mediaType == "image" ? "Photo" : "Test file").font(.headline)
+         Text("\(item.mediaType == "video" ? "Video" : item.mediaType == "image" ? "Photo" : "Test file") \(index+1)").font(.headline)
          Label(item.state.displayTitle,systemImage:item.state == .protected ? "checkmark.shield.fill":"arrow.up.circle")
           .font(.subheadline).foregroundStyle(item.state == .protected ? AcloudStyle.accent:Color.secondary)
         }
@@ -286,9 +286,10 @@ struct BackupQueueView:View {
          VStack(alignment:.leading) {transferActions(item)}
         }.buttonStyle(.bordered).controlSize(.regular).disabled(model.busy)
        }
-       if let code=item.lastErrorCode,item.state != .protected {
-        DisclosureGroup("Support details"){Text(code).font(.caption).textSelection(.enabled)}.font(.caption)
-       }
+       DisclosureGroup("Support details") {
+        Text("Transfer reference: B-\(item.id.uuidString.prefix(8))").textSelection(.enabled)
+        if let code=item.lastErrorCode,item.state != .protected {Text(code).textSelection(.enabled)}
+       }.font(.caption)
       }.padding(.vertical,12)
      }
      if model.items.count==100 {Text("Showing up to 100 recent transfers.").font(.footnote).foregroundStyle(.secondary)}
