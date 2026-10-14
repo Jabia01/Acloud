@@ -112,6 +112,10 @@ struct DiscoveryView: View {
         NavigationStack {
             Form {
                 Section {
+                    AcloudHero(icon:"photo.on.rectangle",eyebrow:"On your device",title:"Your library. Your choice.",message:"See the photos and videos you allow Acloud to access. Scanning your library never uploads or deletes an original.").acloudFeatureRow()
+                }
+
+                Section {
                     switch model.authorization {
                     case .notDetermined:
                         Text("Allow photo access to discover photos and videos on this device. Discovery reads metadata only.")
@@ -131,10 +135,12 @@ struct DiscoveryView: View {
                     }
                 }
                 if model.authorization.canRead {
-                    Section("Discovery summary") {
+                    Section("Library overview") {
                         if let summary = model.summary {
-                            LabeledContent("Photos",value:summary.images.formatted())
-                            LabeledContent("Videos",value:summary.videos.formatted())
+                            LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
+                                AcloudMetric(title:"Photos",value:summary.images.formatted(),icon:"photo")
+                                AcloudMetric(title:"Videos",value:summary.videos.formatted(),icon:"video")
+                            }.acloudFeatureRow()
                             LabeledContent("Known resource size",value:summary.knownSizeAssets == 0 ? "Unknown" : ByteCountFormatter.string(fromByteCount:summary.knownResourceBytes,countStyle:.file))
                             Text("\(summary.unknownSizeAssets.formatted()) items have unknown size. Known resource sizes do not establish that originals are on this device.").font(.footnote)
                             if !summary.isComplete { Text("Partial scan: these are not final library totals.") }
@@ -150,7 +156,8 @@ struct DiscoveryView: View {
                     }
                 } else { Text(model.status).font(.footnote) }
             }
-            .navigationTitle("Photo Library")
+            .acloudCanvas()
+            .navigationTitle("Library")
         }
         .task { await model.activate() }
         .onChange(of:scenePhase) { _, phase in

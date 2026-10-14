@@ -230,41 +230,100 @@ struct BackupQueueView:View {
  @ObservedObject private var model=BackupQueueModel.shared
  private enum PickerSelection:String,Identifiable {case photo,video,originals;var id:String{rawValue}}
  @State private var pickerSelection:PickerSelection?
- #if DEBUG
- private var developmentSelection:some View {
-Section("Single-item development test") {
-    Button("Choose One Test Photo") { pickerSelection = .photo }.disabled(!model.canSelectOriginals || model.busy)
-    Button("Choose One Test Video") { pickerSelection = .video }.disabled(!model.canSelectOriginals || model.busy)
-    Text("Choose a disposable screenshot or an unedited video of 30 seconds or less. Only your selected item is queued. Originals are kept; iCloud downloads are off.")
-   }
- }
- #endif
+ private var protectedCount:Int {model.summary[.protected] ?? 0}
+ private var waitingCount:Int {model.summary.filter{![BackupState.protected,.cancelled].contains($0.key)}.values.reduce(0,+)}
  var body:some View {
-  NavigationStack{List{
-   Section("Backup Queue"){
-    ForEach(BackupState.allCases,id:\.self){state in if let count=model.summary[state],count>0{Text("\(count) · \(state.displayTitle)")}}
-    Text(model.message).font(.footnote)
-   }
-   #if DEBUG
-   developmentSelection
-   #else
-   Section("Original backup"){Toggle("Download iCloud originals on Wi-Fi",isOn:$model.allowICloudOriginals).onChange(of:model.allowICloudOriginals){_,_ in Task{await model.updateOriginalPolicy()}};Button("Choose originals for backup"){pickerSelection = .originals}.disabled(!model.canSelectOriginals||model.busy);Text("Selection is explicit. Photos are never deleted automatically.");if model.originalProgress>0{ProgressView(value:model.originalProgress)}}
-   #endif
-   #if DEBUG
-   Section("Development Controls"){
-    Button("Queue Generated 20 MiB File"){Task{await model.enqueueGenerated()}}
-    Button("Pause All"){Task{await model.pauseAll()}}
-    Button("Resume"){Task{await model.resumeAll()}}
-    Button("Retry Failed"){Task{await model.retryFailed()}}
-   }.disabled(model.busy)
-   #endif
-   Section("Backup completeness"){ForEach(model.manifests){manifest in VStack(alignment:.leading){Text(manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media");Text(manifest.state == .fullyProtected ? "Required resources protected":manifest.state == .sourceChanged ? "Source changed — recapture required":"Preservation incomplete or awaiting verification");Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required resources protected").font(.caption);Text("Restoring this format and removing device copies are not yet approved for beta use.").font(.caption)}}}
-   Section("Recent transfers (up to 100)"){
-    ForEach(model.items){item in VStack(alignment:.leading){Text("\(item.mediaType == "video" ? "Video" : item.mediaType == "image" ? "Photo" : "Test file") · \(item.state.displayTitle)");if let guidance=backupGuidance(item){Text(guidance).font(.caption)};Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) transferred").font(.caption);if let code=item.lastErrorCode,item.state != .protected{DisclosureGroup("Support details"){Text(code).font(.caption).textSelection(.enabled)}}
-     HStack{Button("Pause"){Task{await model.pause(item.id)}};if [.failedPermanent,.failedRetryable].contains(item.state){Button("Retry"){Task{await model.retry(item.id)}}}else{Button("Resume"){Task{await model.resume(item.id)}}};Button("Cancel"){Task{await model.cancel(item.id)}}}.buttonStyle(.borderless).disabled(item.state == .protected)
-    }}
-   }
-  }.navigationTitle("Backup Queue")}.sheet(item:$pickerSelection){selection in OriginalAssetPicker(videoOnly:selection == .video){ids in pickerSelection=nil;Task{await model.enqueueSelected(ids)}}.id(selection.id)}.task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
+  NavigationStack {
+   List {
+    Section {
+     AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Make room for memories.",message:"Choose what to back up. We check each stored file before marking it protected. Keep your originals during beta.").acloudFeatureRow()
+     LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
+      AcloudMetric(title:"Verified in this queue",value:protectedCount.formatted(),icon:"checkmark.shield")
+      AcloudMetric(title:"Waiting or in progress",value:waitingCount.formatted(),icon:"arrow.triangle.2.circlepath")
+     }.acloudFeatureRow()
+    }
+    Section("Add a backup") {
+     #if DEBUG
+     HStack {
+      Button {pickerSelection = .photo} label:{Label("Choose photo",systemImage:"photo.badge.plus")}
+      Button {pickerSelection = .video} label:{Label("Choose video",systemImage:"video.badge.plus")}
+     }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
+     Text("Private device test: choose one disposable photo or an unedited video up to 30 seconds. Originals are kept.").font(.footnote).foregroundStyle(.secondary)
+     #else
+     Button {pickerSelection = .originals} label:{Label("Choose photos and videos",systemImage:"plus.circle.fill").frame(maxWidth:.infinity)}
+      .buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
+     #endif
+     Toggle("Download iCloud originals on Wi-Fi",isOn:$model.allowICloudOriginals).onChange(of:model.allowICloudOriginals){_,_ in Task{await model.updateOriginalPolicy()}}
+     Text("iCloud downloads happen only when you allow them. Selecting library access does not start a backup.").font(.footnote).foregroundStyle(.secondary)
+     if model.originalProgress>0 {ProgressView("Preparing original",value:model.originalProgress)}
+     Text(model.message).font(.footnote).foregroundStyle(.secondary)
+    }
+    Section("Your transfers") {
+     if model.items.isEmpty {
+      VStack(alignment:.leading,spacing:10) {
+       Label("Your first backup starts here",systemImage:"photo.on.rectangle.angled").font(.headline)
+       Text("Choose a photo or video above. Its progress and verified backup status will appear here.").foregroundStyle(.secondary)
+      }.padding(.vertical,12)
+     }
+     ForEach(model.items) { item in
+      VStack(alignment:.leading,spacing:14) {
+       HStack(spacing:14) {
+        AcloudMediaIcon(video:item.mediaType == "video")
+        VStack(alignment:.leading,spacing:5) {
+         Text(item.mediaType == "video" ? "Video" : item.mediaType == "image" ? "Photo" : "Test file").font(.headline)
+         Label(item.state.displayTitle,systemImage:item.state == .protected ? "checkmark.shield.fill":"arrow.up.circle")
+          .font(.subheadline).foregroundStyle(item.state == .protected ? AcloudStyle.accent:Color.secondary)
+        }
+       }
+       if let total=item.expectedSizeBytes,total>0 {
+        ProgressView(value:Double(min(item.bytesUploaded,total)),total:Double(total)).accessibilityLabel("Bytes transferred")
+        Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) of \(Int64(total).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)
+       } else {Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)}
+       if let guidance=backupGuidance(item){Text(guidance).font(.subheadline).foregroundStyle(.secondary)}
+       if ![BackupState.protected,.cancelled].contains(item.state) {
+        ViewThatFits(in:.horizontal) {
+         HStack {transferActions(item)}
+         VStack(alignment:.leading) {transferActions(item)}
+        }.buttonStyle(.bordered).controlSize(.regular).disabled(model.busy)
+       }
+       if let code=item.lastErrorCode,item.state != .protected {
+        DisclosureGroup("Support details"){Text(code).font(.caption).textSelection(.enabled)}.font(.caption)
+       }
+      }.padding(.vertical,12)
+     }
+     if model.items.count==100 {Text("Showing up to 100 recent transfers.").font(.footnote).foregroundStyle(.secondary)}
+    }
+    if !model.manifests.isEmpty {
+     Section("Backup completeness") {
+      ForEach(model.manifests){manifest in
+       VStack(alignment:.leading,spacing:8) {
+        Label(manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media",systemImage:"square.stack.3d.up").font(.headline)
+        Text(manifest.state == .fullyProtected ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files")
+        Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required files protected").font(.caption)
+        Text("Restoring this format and removing device copies still require beta acceptance.").font(.footnote).foregroundStyle(.secondary)
+       }.padding(.vertical,8)
+      }
+     }
+    }
+    #if DEBUG
+    Section {
+     DisclosureGroup("Development tools") {
+      Button("Queue generated 20 MiB file"){Task{await model.enqueueGenerated()}}
+      Button("Pause all"){Task{await model.pauseAll()}}
+      Button("Resume all"){Task{await model.resumeAll()}}
+      Button("Retry failed"){Task{await model.retryFailed()}}
+     }.disabled(model.busy)
+    }
+    #endif
+   }.acloudCanvas().navigationTitle("Backup")
+  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(videoOnly:selection == .video){ids in pickerSelection=nil;Task{await model.enqueueSelected(ids)}}.id(selection.id)}
+   .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
+ }
+ @ViewBuilder private func transferActions(_ item:BackupItem)->some View {
+  if [.failedPermanent,.failedRetryable].contains(item.state) {Button("Retry"){Task{await model.retry(item.id)}}}
+  else if item.state == .paused {Button("Resume"){Task{await model.resume(item.id)}}}
+  else {Button("Pause"){Task{await model.pause(item.id)}}}
+  Button("Cancel",role:.destructive){Task{await model.cancel(item.id)}}
  }
 }
 

@@ -32,4 +32,40 @@ import BackupEngine
   }catch{guard epoch==model.configurationGeneration else{return};model.message="Storage unavailable. Sign in with this device and check the server."}
  }
 }
-struct StorageView:View {var body:some View{StorageManagementView(model:StorageScreen.model).task{await StorageScreen.connect()}}}
+struct StorageView:View {
+ @ObservedObject private var model=StorageScreen.model
+ var body:some View {
+  NavigationStack {
+   List {
+    Section {
+     AcloudHero(icon:"externaldrive",eyebrow:"Acloud storage",title:"Know what is protected.",message:"Your cloud storage and device storage are separate. Backing up a file never removes its original.").acloudFeatureRow()
+    }
+    Section("Cloud storage") {
+     if let cloud=model.cloud {
+      VStack(alignment:.leading,spacing:14) {
+       Text("\(cloud.protectedBytes.formatted(.byteCount(style:.file))) protected").font(.system(.title2,design:.rounded).weight(.bold))
+       ProgressView(value:Double(min(cloud.protectedBytes,cloud.quotaBytes)),total:Double(max(1,cloud.quotaBytes))).accessibilityLabel("Cloud storage used")
+       Text("\(cloud.quotaBytes.formatted(.byteCount(style:.file))) total capacity").foregroundStyle(.secondary)
+       if cloud.overQuota {Label("Storage limit reached. Existing verified backups are retained.",systemImage:"exclamationmark.circle").foregroundStyle(.orange)}
+      }.padding(.vertical,10)
+      LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
+       AcloudMetric(title:"Available",value:cloud.remainingBytes.formatted(.byteCount(style:.file)),icon:"externaldrive.badge.plus")
+       AcloudMetric(title:"Reserved for transfers",value:cloud.reservedBytes.formatted(.byteCount(style:.file)),icon:"arrow.up.circle")
+      }.acloudFeatureRow()
+     } else {
+      Label("Storage usage is unavailable",systemImage:"externaldrive.badge.questionmark").font(.headline)
+      Text("Sign in and check your connection, then refresh. No storage amount is estimated here.").foregroundStyle(.secondary)
+     }
+     Button {Task{await StorageScreen.connect()}} label:{Label("Refresh storage",systemImage:"arrow.clockwise")}.disabled(model.busy)
+    }
+    Section("Device space") {
+     Label("Your originals stay on your device",systemImage:"iphone.and.arrow.forward").font(.headline)
+     Text("Free Up Space is unavailable unless its separate safety checks are approved. Keep another copy of your originals during beta.").foregroundStyle(.secondary)
+     if model.enabled {
+      NavigationLink("Review Free Up Space") {StorageManagementView(model:model)}
+     }
+    }
+   }.acloudCanvas().navigationTitle("Storage")
+  }.task{await StorageScreen.connect()}
+ }
+}

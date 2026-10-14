@@ -20,10 +20,14 @@ struct AccountView: View {
     }
     var body: some View {
         Form {
+            Section {
+                AcloudHero(icon:"person.crop.circle",eyebrow:"Your Acloud",title:"A little peace of mind.",message:"Manage your sign-in and find help with backup, restore or privacy.").acloudFeatureRow()
+            }
+
             if let account {
                 Section("Your account") {
-                    Text(account.email)
-                    Text(account.emailVerified ? "Email verified" : "Email unverified")
+                    Label(account.email,systemImage:"person.crop.circle.fill").font(.headline)
+                    Label(account.emailVerified ? "Email verified" : "Email unverified",systemImage:account.emailVerified ? "checkmark.seal.fill":"envelope.badge").foregroundStyle(account.emailVerified ? AcloudStyle.accent:Color.secondary)
                     Button("Sign Out") { Task { await signOut() } }.disabled(busy)
                 }
             } else {
@@ -41,7 +45,7 @@ struct AccountView: View {
                 Text("Never send passwords, verification codes or private photos. Staging support contact delivery is still being verified.").font(.footnote)
             }
             if !message.isEmpty { Text(message).accessibilityLabel(message) }
-        }.task { if let api { account = try? await api.me() } }
+        }.acloudCanvas().task { if let api { account = try? await api.me() } }
     }
     @MainActor private func signIn() async {
         guard let api else { message = "API configuration unavailable."; return }
