@@ -69,6 +69,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  @Published var busy=false
  @Published var canSelectOriginals=false
  @Published var originalProgress:Double=0
+ @Published var selectionNotice:String?
  @Published var allowICloudOriginals=false
  private var deviceID:UUID?
  private var manifestReconcileCursor:UUID?
@@ -169,18 +170,23 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  }
  func updateOriginalPolicy() async {await action{var policy=BackupPolicy();policy.allowICloudOriginals=self.allowICloudOriginals;try await self.engine?.setPolicy(policy)}}
  func enqueueSelected(_ ids:[String]) async {
+  guard !ids.isEmpty else{selectionNotice="Photos did not provide access to that selection. Check Acloud’s Photos access in Settings, then choose the item again.";return}
   #if DEBUG
-  await action {
+  await action(selection:true) {
    guard self.canSelectOriginals,ids.count==1,let id=ids.first,let queue=self.queue,let account=self.accountID.flatMap(UUID.init(uuidString:)),let device=self.deviceID,let library=self.library else{throw BackupFailure.authorization}
    let descriptor=try await PhotoKitOriginalSource().describe(id)
-   guard descriptor.supported,["image","video"].contains(descriptor.mediaType) else {self.message="Choose one ordinary photo or unedited video. Live Photos, RAW, and edited media are excluded from this test.";return}
-   if descriptor.mediaType == "video" {guard let duration=descriptor.duration,duration>0,duration<=30 else{self.message="Choose a short test video of 30 seconds or less.";return}}
+   guard descriptor.supported,["image","video"].contains(descriptor.mediaType) else {self.selectionNotice="Choose one ordinary photo or unedited video. Live Photos, RAW, and edited media are excluded from this test.";return}
+   if descriptor.mediaType == "video" {guard let duration=descriptor.duration,duration>0,duration<=30 else{self.selectionNotice="Choose a short test video of 30 seconds or less.";return}}
    var item=BackupItem(libraryID:library,localAssetIdentifier:id,mediaType:descriptor.mediaType)
    item.accountID=account;item.deviceID=device
-   _=try await queue.enqueue(item)
+   let queuedID=try await queue.enqueue(item)
+   if queuedID != item.id {
+    let existing=try await queue.read(queuedID)
+    self.selectionNotice="This item is already in your transfers (B-\(queuedID.uuidString.prefix(8))). Status: \(existing?.state.displayTitle ?? "In queue"). No duplicate was added."
+   } else {self.selectionNotice="Added to your transfers (B-\(queuedID.uuidString.prefix(8)))."}
   }
   #else
-  await action{
+  await action(selection:true){
    guard self.canSelectOriginals,ids.count<=10,let queue=self.queue,let account=self.accountID.flatMap(UUID.init(uuidString:)),let device=self.deviceID,let library=self.library else{throw BackupFailure.authorization}
    guard let store=self.manifestStore,let api=self.manifestAPI else{throw BackupFailure.missing};let binding=ManifestBinding(accountID:account,deviceID:device,libraryID:library),planner=MultiResourceBackupPlanner(store:store,queue:queue);for id in Set(ids){let snapshot=try await PhotoKitMediaSource().snapshot(id);let manifest=try await planner.captureExplicit(source:snapshot,binding:binding);_=try await api.createManifest(manifest);_=try await planner.enqueue(manifest,binding:binding)}
   }
@@ -197,9 +203,15 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   }
   manifests=(try? await store.page(binding:binding,limit:50)) ?? []
  }
- func action(_ operation:() async throws -> Void) async {
+ func action(selection:Bool=false,_ operation:() async throws -> Void) async {
   busy=true;defer{busy=false}
-  do{try await connect();try await operation();await refresh()}catch{message="Action paused or failed. The queue retains its state."}
+  do{try await connect();try await operation();await refresh()}catch{
+   message="Action paused or failed. The queue retains its state."
+   if selection {
+    if let failure=error as? BackupFailure,failure == .inaccessible {selectionNotice="Acloud could not access this photo. Check Photos access in Settings, including whether this item is allowed under Limited Access."}
+    else {selectionNotice="The selection could not be added. Check your account connection and Photos access, then try again."}
+   }
+  }
  }
  func pauseAll() async{await action{try await self.engine?.pauseAll()}}
  func resumeAll() async{await action{try await self.engine?.resumeAll()}}
@@ -298,7 +310,8 @@ struct BackupQueueView:View {
     }
     #endif
    }.acloudCanvas().navigationTitle("Backup")
-  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(videoOnly:selection == .video){ids in pickerSelection=nil;Task{await model.enqueueSelected(ids)}}.id(selection.id)}
+  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(videoOnly:selection == .video){ids in pickerSelection=nil;guard let ids else{return};transferFilter = .all;Task{await model.enqueueSelected(ids)}}.id(selection.id)}
+   .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
    .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
  }
  private func transferRow(_ item:BackupItem)->some View {
@@ -339,7 +352,7 @@ struct BackupQueueView:View {
 
 private struct OriginalAssetPicker:UIViewControllerRepresentable {
  let videoOnly:Bool
- let selected:([String])->Void
+ let selected:([String]?)->Void
  func makeCoordinator()->Coordinator{Coordinator(selected:selected)}
  func makeUIViewController(context:Context)->PHPickerViewController{var config=PHPickerConfiguration(photoLibrary:.shared());
   #if DEBUG
@@ -349,5 +362,5 @@ private struct OriginalAssetPicker:UIViewControllerRepresentable {
   #endif
   let picker=PHPickerViewController(configuration:config);picker.delegate=context.coordinator;return picker}
  func updateUIViewController(_ controller:PHPickerViewController,context:Context){}
- final class Coordinator:NSObject,PHPickerViewControllerDelegate{let selected:([String])->Void;init(selected:@escaping([String])->Void){self.selected=selected};func picker(_ picker:PHPickerViewController,didFinishPicking results:[PHPickerResult]){selected(results.compactMap(\.assetIdentifier))}}
+ final class Coordinator:NSObject,PHPickerViewControllerDelegate{let selected:([String]?)->Void;init(selected:@escaping([String]?)->Void){self.selected=selected};func picker(_ picker:PHPickerViewController,didFinishPicking results:[PHPickerResult]){selected(results.isEmpty ? nil:results.compactMap(\.assetIdentifier))}}
 }
