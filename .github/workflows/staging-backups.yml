@@ -1,0 +1,60 @@
+name: Staging database backups
+on:
+  schedule:
+    - cron: '17 8 * * *'
+    - cron: '37 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Backup, overdue check, or isolated restore
+        required: true
+        default: daily
+        type: choice
+        options: [daily, monitor, restore]
+      force_restore:
+        description: Also restore this backup in an isolated local database
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: staging-backup-operations
+  cancel-in-progress: false
+jobs:
+  backup:
+    if: github.repository == 'Jabia01/Acloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: staging-backups
+    defaults:
+      run:
+        working-directory: infrastructure/backup
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # official v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # official v4
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - name: Daily backup or manual recovery drill
+        if: github.event.schedule != '37 * * * *' && (github.event_name != 'workflow_dispatch' || inputs.mode != 'monitor')
+        env:
+          BACKUP_SOURCE_JSON: ${{ secrets.BACKUP_SOURCE_JSON }}
+          BACKUP_B2_JSON: ${{ secrets.BACKUP_B2_JSON }}
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+          BACKUP_ALERT_RESEND_KEY: ${{ secrets.BACKUP_ALERT_RESEND_KEY }}
+          BACKUP_ALERT_FROM: ${{ vars.BACKUP_ALERT_FROM }}
+          BACKUP_ALERT_TO: Privacy247.acloud@useacloud.com
+          BACKUP_FORCE_RESTORE: ${{ inputs.force_restore && 'true' || 'false' }}
+          BACKUP_MODE: ${{ inputs.mode || 'daily' }}
+        run: node run.mjs "$BACKUP_MODE"
+      - name: Hourly overdue check
+        if: github.event.schedule == '37 * * * *' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'monitor')
+        env:
+          BACKUP_B2_JSON: ${{ secrets.BACKUP_B2_JSON }}
+          BACKUP_ALERT_RESEND_KEY: ${{ secrets.BACKUP_ALERT_RESEND_KEY }}
+          BACKUP_ALERT_FROM: ${{ vars.BACKUP_ALERT_FROM }}
+          BACKUP_ALERT_TO: Privacy247.acloud@useacloud.com
+        run: node run.mjs monitor
