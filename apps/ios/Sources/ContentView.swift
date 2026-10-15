@@ -1,5 +1,7 @@
 import SwiftUI
 import HealthClient
+import Photos
+import UIKit
 
 struct ContentView: View {
     @State private var status = "Checking..."
@@ -99,5 +101,109 @@ extension View {
     func acloudFeatureRow()->some View {
         self.listRowInsets(EdgeInsets(top:8,leading:0,bottom:8,trailing:0))
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
+    }
+}
+
+// Media-list presentation stays local. Preview requests never download iCloud originals.
+enum AcloudMediaFilter:String,CaseIterable,Identifiable {
+    case all="All", photos="Photos", videos="Videos"
+    var id:String {rawValue}
+    func includes(_ type:String)->Bool {self == .all || (self == .photos && type == "image") || (self == .videos && type == "video")}
+}
+struct AcloudDatedMediaGroup<Item>:Identifiable {
+    let id:String
+    let mediaType:String
+    let day:Date?
+    let items:[Item]
+    var title:String {mediaType == "image" ? "Photos" : mediaType == "video" ? "Videos" : "Other files"}
+}
+func acloudMediaGroups<Item>(_ items:[Item],type:(Item)->String,date:(Item)->Date?)->[AcloudDatedMediaGroup<Item>] {
+    let calendar=Calendar.current
+    let grouped=Dictionary(grouping:items){item in
+        let kind=["image","video"].contains(type(item)) ? type(item):"other"
+        let day=date(item).map{String(calendar.startOfDay(for:$0).timeIntervalSince1970)} ?? "undated"
+        return kind+"|"+day
+    }
+    return grouped.map{key,values in
+        AcloudDatedMediaGroup(id:key,mediaType:key.components(separatedBy:"|")[0],day:date(values[0]).map{calendar.startOfDay(for:$0)},items:values.sorted{(date($0) ?? .distantPast) > (date($1) ?? .distantPast)})
+    }.sorted{a,b in
+        let rank:[String:Int]=["image":0,"video":1,"other":2]
+        if a.mediaType != b.mediaType{return rank[a.mediaType,default:2] < rank[b.mediaType,default:2]}
+        return (a.day ?? .distantPast) > (b.day ?? .distantPast)
+    }
+}
+struct AcloudMediaGroupTitle:View {
+    let title:String
+    let date:Date?
+    var body:some View {
+        VStack(alignment:.leading,spacing:3) {
+            Text(title)
+            if let date {Text(date,format:.dateTime.month(.wide).day().year()).font(.caption)}
+            else {Text("Date unavailable").font(.caption)}
+        }
+    }
+}
+struct AcloudMediaHeader:View {
+    let type:String
+    let reference:UUID
+    var localID:String?=nil
+    let dateLabel:String
+    let date:Date?
+    var detail:String?=nil
+    @State private var capturedAt:Date?
+    var body:some View {
+        HStack(alignment:.top,spacing:14) {
+            ZStack(alignment:.bottomTrailing) {
+                RoundedRectangle(cornerRadius:12).fill(AcloudStyle.accent.opacity(0.1))
+                Image(systemName:type == "video" ? "video.fill":type == "image" ? "photo.fill":"doc.fill").foregroundStyle(AcloudStyle.accent)
+                AcloudLocalThumbnail(localID:localID,captureDate:$capturedAt).clipShape(RoundedRectangle(cornerRadius:12))
+                if type == "video" {Image(systemName:"play.fill").font(.caption2).padding(6).foregroundStyle(.white).background(.black.opacity(0.65),in:Circle()).padding(5)}
+            }.frame(width:76,height:76).accessibilityHidden(true)
+            VStack(alignment:.leading,spacing:5) {
+                Text("\(type == "video" ? "Video":type == "image" ? "Photo":"File") · \(reference.uuidString.prefix(6))")
+                    .font(.headline).foregroundStyle(.primary)
+                if let capturedAt {Text("Taken \(capturedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.subheadline).foregroundStyle(.secondary)}
+                if let date {Text("\(dateLabel) \(date.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.caption).foregroundStyle(.secondary)}
+                else {Text("\(dateLabel) date unavailable").font(.caption).foregroundStyle(.secondary)}
+                if let detail {Text(detail).font(.caption).foregroundStyle(.secondary)}
+            }.fixedSize(horizontal:false,vertical:true)
+        }
+    }
+}
+private struct AcloudLocalThumbnail:UIViewRepresentable {
+    let localID:String?
+    @Binding var captureDate:Date?
+    final class Coordinator {
+        var identity:String?
+        var token=UUID()
+        var request:PHImageRequestID=PHInvalidImageRequestID
+        let manager=PHImageManager.default()
+    }
+    func makeCoordinator()->Coordinator {Coordinator()}
+    func makeUIView(context:Context)->UIImageView {
+        let view=UIImageView();view.contentMode = .scaleAspectFill;view.clipsToBounds=true
+        view.setContentHuggingPriority(.defaultLow,for:.horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        return view
+    }
+    func updateUIView(_ view:UIImageView,context:Context) {
+        let status=PHPhotoLibrary.authorizationStatus(for:.readWrite)
+        let identity=(localID ?? "none")+"|"+String(status.rawValue)
+        let coordinator=context.coordinator
+        guard identity != coordinator.identity else{return}
+        coordinator.manager.cancelImageRequest(coordinator.request)
+        coordinator.identity=identity;coordinator.token=UUID();view.image=nil
+        let token=coordinator.token
+        let asset:PHAsset?=(status == .authorized || status == .limited) ? localID.flatMap{PHAsset.fetchAssets(withLocalIdentifiers:[$0],options:nil).firstObject}:nil
+        let binding=$captureDate
+        DispatchQueue.main.async {if coordinator.token==token{binding.wrappedValue=asset?.creationDate}}
+        guard let asset else{return}
+        let options=PHImageRequestOptions();options.isNetworkAccessAllowed=false;options.deliveryMode = .opportunistic;options.resizeMode = .fast
+        coordinator.request=coordinator.manager.requestImage(for:asset,targetSize:CGSize(width:160,height:160),contentMode:.aspectFill,options:options){[weak view,weak coordinator] image,_ in
+            DispatchQueue.main.async {guard let coordinator,coordinator.token==token else{return};view?.image=image}
+        }
+    }
+    static func dismantleUIView(_ view:UIImageView,coordinator:Coordinator) {
+        coordinator.token=UUID();coordinator.manager.cancelImageRequest(coordinator.request);view.image=nil
     }
 }

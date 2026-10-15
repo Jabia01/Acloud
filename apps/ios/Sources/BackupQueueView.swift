@@ -230,6 +230,7 @@ struct BackupQueueView:View {
  @ObservedObject private var model=BackupQueueModel.shared
  private enum PickerSelection:String,Identifiable {case photo,video,originals;var id:String{rawValue}}
  @State private var pickerSelection:PickerSelection?
+ @State private var transferFilter:AcloudMediaFilter = .all
  private var protectedCount:Int {model.summary[.protected] ?? 0}
  private var waitingCount:Int {model.summary.filter{![BackupState.protected,.cancelled].contains($0.key)}.values.reduce(0,+)}
  var body:some View {
@@ -259,49 +260,29 @@ struct BackupQueueView:View {
      Text(model.message).font(.footnote).foregroundStyle(.secondary)
     }
     Section("Your transfers") {
+     Picker("Media type",selection:$transferFilter) {
+      ForEach(AcloudMediaFilter.allCases){filter in Text(filter.rawValue).tag(filter)}
+     }.pickerStyle(.segmented)
+     Text("Newest first within each group · \(model.items.filter{transferFilter.includes($0.mediaType)}.count) shown")
+      .font(.caption).foregroundStyle(.secondary)
      if model.items.isEmpty {
-      VStack(alignment:.leading,spacing:10) {
-       Label("Your first backup starts here",systemImage:"photo.on.rectangle.angled").font(.headline)
-       Text("Choose a photo or video above. Its progress and verified backup status will appear here.").foregroundStyle(.secondary)
-      }.padding(.vertical,12)
+      ContentUnavailableView("Your first backup starts here",systemImage:"icloud.and.arrow.up",description:Text("Choose a photo or video above to see its progress here."))
+     } else if model.items.filter({transferFilter.includes($0.mediaType)}).isEmpty {
+      Text("No \(transferFilter.rawValue.lowercased()) in this part of the queue.").foregroundStyle(.secondary)
      }
-     ForEach(Array(model.items.enumerated()),id:\.element.id) { index,item in
-      VStack(alignment:.leading,spacing:14) {
-       HStack(spacing:14) {
-        AcloudMediaIcon(video:item.mediaType == "video")
-        VStack(alignment:.leading,spacing:5) {
-         Text("\(item.mediaType == "video" ? "Video" : item.mediaType == "image" ? "Photo" : "Test file") \(index+1)").font(.headline)
-         Label(item.state.displayTitle,systemImage:item.state == .protected ? "checkmark.shield.fill":"arrow.up.circle")
-          .font(.subheadline).foregroundStyle(item.state == .protected ? AcloudStyle.accent:Color.secondary)
-        }
-       }
-       if let total=item.expectedSizeBytes,total>0 {
-        ProgressView(value:Double(min(item.bytesUploaded,total)),total:Double(total)).accessibilityLabel("Bytes transferred")
-        Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) of \(Int64(total).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)
-       } else {Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)}
-       if let guidance=backupGuidance(item){Text(guidance).font(.subheadline).foregroundStyle(.secondary)}
-       if ![BackupState.protected,.cancelled].contains(item.state) {
-        ViewThatFits(in:.horizontal) {
-         HStack {transferActions(item)}
-         VStack(alignment:.leading) {transferActions(item)}
-        }.buttonStyle(.bordered).controlSize(.regular).disabled(model.busy)
-       }
-       DisclosureGroup("Support details") {
-        Text("Transfer reference: B-\(item.id.uuidString.prefix(8))").textSelection(.enabled)
-        if let code=item.lastErrorCode,item.state != .protected {Text(code).textSelection(.enabled)}
-       }.font(.caption)
-      }.padding(.vertical,12)
-     }
-     if model.items.count==100 {Text("Showing up to 100 recent transfers.").font(.footnote).foregroundStyle(.secondary)}
     }
+    ForEach(acloudMediaGroups(model.items.filter{transferFilter.includes($0.mediaType)},type:{$0.mediaType},date:{$0.createdAt})) {group in
+     Section {ForEach(group.items){item in transferRow(item)}} header:{AcloudMediaGroupTitle(title:group.title+" · transfers",date:group.day)}
+    }
+    if model.items.count==100 {Section {Text("Showing up to 100 recent transfers.").font(.footnote).foregroundStyle(.secondary)}}
     if !model.manifests.isEmpty {
      Section("Backup completeness") {
       ForEach(model.manifests){manifest in
-       VStack(alignment:.leading,spacing:8) {
-        Label(manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media",systemImage:"square.stack.3d.up").font(.headline)
-        Text(manifest.state == .fullyProtected ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files")
+       VStack(alignment:.leading,spacing:10) {
+        AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,localID:manifest.source.localID,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
+        Label(manifest.state == .fullyProtected ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files",systemImage:manifest.state == .fullyProtected ? "checkmark.shield.fill":"square.stack.3d.up")
         Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required files protected").font(.caption)
-        Text("Restoring this format and removing device copies still require beta acceptance.").font(.footnote).foregroundStyle(.secondary)
+        DisclosureGroup("Details") {Text("Restoring this format and removing device copies still require beta acceptance.").font(.footnote).foregroundStyle(.secondary)}
        }.padding(.vertical,8)
       }
      }
@@ -319,6 +300,34 @@ struct BackupQueueView:View {
    }.acloudCanvas().navigationTitle("Backup")
   }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(videoOnly:selection == .video){ids in pickerSelection=nil;Task{await model.enqueueSelected(ids)}}.id(selection.id)}
    .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
+ }
+ private func transferRow(_ item:BackupItem)->some View {
+  VStack(alignment:.leading,spacing:12) {
+   AcloudMediaHeader(type:item.mediaType,reference:item.id,localID:item.mediaResourceBinding?.sourceLocalID ?? item.originalManifest?.source.localID ?? (item.mediaType == "test" ? nil:item.localAssetIdentifier),dateLabel:"Backup added",date:item.createdAt,detail:item.mediaType == "test" ? "Generated or supporting file":nil)
+   Label(item.state.displayTitle,systemImage:item.state == .protected ? "checkmark.shield.fill":item.state == .failedPermanent || item.state == .failedRetryable ? "exclamationmark.circle":"arrow.up.circle")
+    .font(.subheadline.weight(.semibold)).foregroundStyle(item.state == .protected ? AcloudStyle.accent:Color.primary)
+   if item.state == .protected {
+    if let size=item.expectedSizeBytes {Text("Verified size · \(Int64(size).formatted(.byteCount(style:.file)))").font(.caption).foregroundStyle(.secondary)}
+   } else if item.state != .cancelled {
+    if let total=item.expectedSizeBytes,total>0 {
+     ProgressView(value:Double(min(item.bytesUploaded,total)),total:Double(total)).accessibilityLabel("Bytes transferred")
+     Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) of \(Int64(total).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)
+    } else {Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)}
+   }
+   if [.paused,.failedPermanent,.failedRetryable].contains(item.state),let guidance=backupGuidance(item) {Text(guidance).font(.subheadline).foregroundStyle(.secondary)}
+   if ![BackupState.protected,.cancelled].contains(item.state) {
+    ViewThatFits(in:.horizontal){HStack{transferActions(item)};VStack(alignment:.leading){transferActions(item)}}
+     .buttonStyle(.bordered).controlSize(.regular).disabled(model.busy)
+   }
+   DisclosureGroup("Details & support") {
+    VStack(alignment:.leading,spacing:6) {
+     Text("Transfer reference: B-\(item.id.uuidString.prefix(8))").textSelection(.enabled)
+     Text("Last updated \(item.updatedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))")
+     if let guidance=backupGuidance(item){Text(guidance)}
+     if let code=item.lastErrorCode,item.state != .protected {Text(code).textSelection(.enabled)}
+    }.font(.caption).foregroundStyle(.secondary)
+   }.font(.caption)
+  }.padding(.vertical,10)
  }
  @ViewBuilder private func transferActions(_ item:BackupItem)->some View {
   if [.failedPermanent,.failedRetryable].contains(item.state) {Button("Retry"){Task{await model.retry(item.id)}}}

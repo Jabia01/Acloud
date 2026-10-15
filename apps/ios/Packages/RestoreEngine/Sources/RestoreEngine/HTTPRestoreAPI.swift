@@ -2,7 +2,7 @@ import Foundation
 import MediaPreservation
 import HealthClient
 private final class RestoreNoRedirect:NSObject,URLSessionTaskDelegate,@unchecked Sendable{func urlSession(_ session:URLSession,task:URLSessionTask,willPerformHTTPRedirection response:HTTPURLResponse,newRequest request:URLRequest,completionHandler:@escaping(URLRequest?)->Void){completionHandler(nil)}}
-public struct ProtectedRestoreAsset:Decodable,Identifiable,Sendable{public let id:UUID,mediaType:String,sizeBytes:Int?}
+public struct ProtectedRestoreAsset:Decodable,Identifiable,Sendable{public let id:UUID,mediaType:String,sizeBytes:Int?;public let protectedAt:String?,captureDate:String?,durationSeconds:Double?}
 public struct ProtectedRestorePage:Decodable,Sendable{public let items:[ProtectedRestoreAsset],nextCursor:String?}
 public actor HTTPRestoreAPI:RestoreAPI,CompoundRestoreAPI{
  private let base:URL,tokens:any SessionTokenStore,session:URLSession

@@ -83,23 +83,131 @@ selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test
  func control(_ item:RestoreItem,_ action:String)async{do{try await connect();if action=="pause"{try await coordinator?.pause(item.id)}else if action=="cancel"{try await coordinator?.cancel(item.id)}else{try await coordinator?.resume(item.id)};await refresh()}catch{message="Save outcome requires review; an uncertain Photos save is never retried automatically."}}
  func compoundControl(_ r:CompoundRestoreRecord,_ action:String)async{do{try await connect();if action=="pause"{try await compoundCoordinator?.pause(r.id)}else if action=="cancel"{try await compoundCoordinator?.cancel(r.id)}else{try await compoundCoordinator?.resume(r.id)};await refresh()}catch{message="An uncertain Photos save requires reconciliation before retry."}}
  func restoreVariant(_ asset:UUID,choice:ManifestRestoreChoice)async{do{try await connect();guard canRestore,let api,let compoundQueue,let account,let library,let manifest=try await api.manifestForAsset(asset) else{throw RestoreFailure.disabled};let plan=try await api.compoundPlan(manifest.id,fingerprint:manifest.manifestFingerprint,choice:choice);try await compoundQueue.insert(CompoundRestoreRecord(account:account,library:library,plan:plan));await refresh()}catch{message="This restore variant is unsupported or awaits fidelity acceptance."}}
+ func localPreviewID(for asset:UUID)->String? {
+  guard let account else{return nil}
+  guard let item=BackupQueueModel.shared.items.first(where:{$0.assetID==asset && $0.accountID==account}) else{return nil}
+  return item.mediaResourceBinding?.sourceLocalID ?? item.originalManifest?.source.localID ?? (item.mediaType == "test" ? nil:item.localAssetIdentifier)
+ }
+ func localPreviewID(forManifest id:UUID)->String? {
+  guard let account else{return nil}
+  return BackupQueueModel.shared.manifests.first(where:{$0.id==id && $0.binding.accountID==account})?.source.localID
+ }
  func requestPermission()async{_=await PHPhotoLibrary.requestAuthorization(for:.addOnly);await refresh()}
+}
+
+private extension ProtectedRestoreAsset {
+ var backupDate:Date? {
+  guard let protectedAt else{return nil}
+  let formatter=ISO8601DateFormatter();formatter.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
+  return formatter.date(from:protectedAt) ?? ISO8601DateFormatter().date(from:protectedAt)
+ }
 }
 struct RestoreView:View {
  @ObservedObject private var model=RestoreModel.shared
  @State private var confirmAnother=false
- var body:some View{NavigationStack{List{
-  Section {
-   AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Back to your Photos.",message:"Select a verified backup to save a new copy to your device. Your cloud backup stays protected.").acloudFeatureRow()
-  }
-  Section("Restore your backups"){Text(RestoreCopy.iCloudWarning).font(.footnote);Text("Restore creates a new Photos copy. Cloud protection and quota stay unchanged.").font(.footnote);Text(model.message);if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))")};Text("Selected \(model.selectedPhotos) photos, \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))")
-   Button("Allow Photos additions"){Task{await model.requestPermission()}}.disabled(!model.canRestore)
-   Button {Task{await model.enqueue()}} label:{Label("Restore selected to Photos",systemImage:"arrow.down.circle.fill").frame(maxWidth:.infinity)}.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.selected.isEmpty||model.busy || !model.canRestore)
-   Button("Restore another copy…"){confirmAnother=true}.disabled(model.selected.isEmpty || !model.canRestore)
-  }
-  Section("Choose items to restore"){ForEach(Array(model.assets.enumerated()),id:\.element.id){index,asset in Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{if $0{model.selected.insert(asset.id)}else{model.selected.remove(asset.id)}})){HStack(spacing:14){AcloudMediaIcon(video:asset.mediaType == "video");VStack(alignment:.leading,spacing:5){Text("\(asset.mediaType == "video" ? "Video":"Photo") \(index+1)").font(.headline);Text("Verified backup · \((asset.sizeBytes ?? 0).formatted(.byteCount(style:.file)))").font(.caption).foregroundStyle(.secondary)}}.padding(.vertical,6)}};Button("Refresh protected library"){Task{await model.loadAssets()}};if model.hasNextAssets{Button("Next protected page"){Task{await model.loadAssets(next:true)}}}}
-  Section {DisclosureGroup("Advanced restore: Live Photos and edits"){Text("Live Photos require both resources. Edited assets require an explicit original or rendered choice; adjustment recipes cannot be reapplied exactly.");ForEach(model.assets){a in HStack{Button("Restore original"){Task{await model.restoreVariant(a.id,choice:.original)}};Button("Restore rendered edit"){Task{await model.restoreVariant(a.id,choice:.edited)}}.disabled(!model.canRestore)}};ForEach(model.compounds){r in VStack{Text("\(r.plan.manifest.kind.rawValue) · \(r.state.rawValue) · \(r.plan.resources.count) resources");if ![.restored,.saving,.reconcile,.cancelled].contains(r.state){HStack{Button("Pause"){Task{await model.compoundControl(r,"pause")}};Button("Retry"){Task{await model.compoundControl(r,"resume")}};Button("Cancel"){Task{await model.compoundControl(r,"cancel")}}}.buttonStyle(.borderless)}}}}
-  }
-  Section("Restore progress"){ForEach(Array(model.items.enumerated()),id:\.element.id){index,item in VStack(alignment:.leading){Text("\(item.evidence.mediaType == "video" ? "Video":"Photo") \(index+1)").font(.headline);DisclosureGroup("Support details"){Text("Transfer reference: R-\(item.id.uuidString.prefix(8))").font(.caption).textSelection(.enabled)};Label(item.state.displayTitle,systemImage:item.state == .restored ? "checkmark.circle.fill":"arrow.down.circle").font(.headline);ProgressView(value:Double(min(model.progress[item.id] ?? item.bytesDownloaded,item.evidence.expectedSize)),total:Double(max(1,item.evidence.expectedSize))).accessibilityLabel("Download progress");Text("\((model.progress[item.id] ?? item.bytesDownloaded).formatted(.byteCount(style:.file))) / \(item.evidence.expectedSize.formatted(.byteCount(style:.file)))").font(.caption);if let code=item.lastErrorCode{Text(code.hasPrefix("PHOTOS_SAVE_ERROR_") ? "Photos reported a save error (code \(code.dropFirst(18))). This copy is unconfirmed; review before restoring again.":code=="SAVE_RESULT_UNCERTAIN" ? "Photos may already contain this copy. Review before restoring again.":code=="INTEGRITY_FAILED" ? "Downloaded bytes failed integrity checks.":code=="PHOTOS_PERMISSION_REQUIRED" ? "Allow Photos additions to continue.":"Restore paused or requires a retry.").font(.caption)};if ![.restored,.saving,.reconcile,.cancelled].contains(item.state){HStack{Button("Pause"){Task{await model.control(item,"pause")}};Button("Resume / Retry"){Task{await model.control(item,"resume")}};Button("Cancel"){Task{await model.control(item,"cancel")}}}.buttonStyle(.borderless)}}};Button("Next queue page"){Task{await model.refresh(next:true)}}}
- }.acloudCanvas().navigationTitle("Restore")}.confirmationDialog("Create another Photos copy?",isPresented:$confirmAnother,titleVisibility:.visible){Button("Restore another copy"){Task{await model.enqueue(again:true)}}}message:{Text("A previous or uncertain restore may already exist. This creates another copy and never removes existing Photos items.")}.task{await model.loadAssets();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}}
+ @State private var mediaFilter:AcloudMediaFilter = .all
+ var body:some View {
+  NavigationStack {
+   List {
+    Section {AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Back to your Photos.",message:"Select a verified backup to save a new copy to your device. Your cloud backup stays protected.").acloudFeatureRow()}
+    Section("Restore your backups") {
+     Text(RestoreCopy.iCloudWarning).font(.footnote)
+     Text("Restore creates a new Photos copy. Cloud protection and quota stay unchanged.").font(.footnote)
+     Text(model.message).font(.subheadline)
+     if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))").font(.caption)}
+     Text("Selected \(model.selectedPhotos) photos, \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))").font(.subheadline)
+     Button("Allow Photos additions"){Task{await model.requestPermission()}}.disabled(!model.canRestore)
+     Button{Task{await model.enqueue()}}label:{Label("Restore selected to Photos",systemImage:"arrow.down.circle.fill").frame(maxWidth:.infinity)}
+      .buttonStyle(.borderedProminent).controlSize(.large).disabled(model.selected.isEmpty || model.busy || !model.canRestore)
+     Button("Restore another copy…"){confirmAnother=true}.disabled(model.selected.isEmpty || !model.canRestore)
+    }
+    Section("Choose items to restore") {
+     Picker("Media type",selection:$mediaFilter){ForEach(AcloudMediaFilter.allCases){filter in Text(filter.rawValue).tag(filter)}}.pickerStyle(.segmented)
+     Text("Grouped by backup date, newest first. A preview appears when the original is available locally.").font(.caption).foregroundStyle(.secondary)
+     if model.assets.isEmpty{Text("No verified backups are available in this page.").foregroundStyle(.secondary)}
+     else if model.assets.filter({mediaFilter.includes($0.mediaType)}).isEmpty{Text("No \(mediaFilter.rawValue.lowercased()) in this page.").foregroundStyle(.secondary)}
+    }
+    ForEach(acloudMediaGroups(model.assets.filter{mediaFilter.includes($0.mediaType)},type:{$0.mediaType},date:{$0.backupDate})) {group in
+     Section {ForEach(group.items){asset in
+      Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{if $0{model.selected.insert(asset.id)}else{model.selected.remove(asset.id)}})) {
+       AcloudMediaHeader(type:asset.mediaType,reference:asset.id,localID:model.localPreviewID(for:asset.id),dateLabel:"Backed up",date:asset.backupDate,detail:asset.sizeBytes.map{"Verified size · \($0.formatted(.byteCount(style:.file)))"} ?? "Verified backup · size unavailable")
+      }.padding(.vertical,8)
+     }} header:{AcloudMediaGroupTitle(title:group.title+" · verified backups",date:group.day)}
+    }
+    Section {
+     Button("Refresh protected library"){Task{await model.loadAssets()}}
+     if model.hasNextAssets{Button("Next protected page"){Task{await model.loadAssets(next:true)}}}
+     DisclosureGroup("Advanced restore: Live Photos and edits") {
+      Text("Live Photos require both resources. Edited assets require an explicit original or rendered choice; adjustment recipes cannot be reapplied exactly.").font(.footnote)
+      ForEach(model.assets.filter{mediaFilter.includes($0.mediaType)}){asset in
+       VStack(alignment:.leading,spacing:8) {
+        AcloudMediaHeader(type:asset.mediaType,reference:asset.id,localID:model.localPreviewID(for:asset.id),dateLabel:"Backed up",date:asset.backupDate)
+        ViewThatFits(in:.horizontal){HStack{variantActions(asset.id)};VStack(alignment:.leading){variantActions(asset.id)}}.buttonStyle(.bordered).disabled(!model.canRestore)
+       }.padding(.vertical,8)
+      }
+     }
+    }
+    if !model.items.isEmpty {
+     Section("Restore progress"){Text("Grouped by the date each restore was requested.").font(.caption).foregroundStyle(.secondary)}
+     ForEach(acloudMediaGroups(model.items.filter{mediaFilter.includes($0.evidence.mediaType)},type:{$0.evidence.mediaType},date:{$0.createdAt})){group in
+      Section {ForEach(group.items){item in restoreRow(item)}} header:{AcloudMediaGroupTitle(title:group.title+" · restores",date:group.day)}
+     }
+    }
+    ForEach(acloudMediaGroups(model.compounds.filter{mediaFilter.includes($0.plan.manifest.mediaType)},type:{$0.plan.manifest.mediaType},date:{$0.createdAt})){group in
+     Section {ForEach(group.items){record in compoundRow(record)}} header:{AcloudMediaGroupTitle(title:group.title+" · complete-media restores",date:group.day)}
+    }
+    if model.items.count==100{Section{Button("Next queue page"){Task{await model.refresh(next:true)}}}}
+   }.acloudCanvas().navigationTitle("Restore")
+  }.confirmationDialog("Create another Photos copy?",isPresented:$confirmAnother,titleVisibility:.visible){Button("Restore another copy"){Task{await model.enqueue(again:true)}}}message:{Text("A previous or uncertain restore may already exist. This creates another copy and never removes existing Photos items.")}
+   .task{await model.loadAssets();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
+ }
+ private func restoreRow(_ item:RestoreItem)->some View {
+  VStack(alignment:.leading,spacing:12) {
+   AcloudMediaHeader(type:item.evidence.mediaType,reference:item.evidence.id,localID:item.localIdentifier ?? model.localPreviewID(for:item.evidence.id),dateLabel:"Restore requested",date:item.createdAt,detail:"Size · \(item.evidence.expectedSize.formatted(.byteCount(style:.file)))")
+   Label(item.state.displayTitle,systemImage:item.state == .restored ? "checkmark.circle.fill":"arrow.down.circle")
+    .font(.subheadline.weight(.semibold)).foregroundStyle(item.state == .restored ? AcloudStyle.accent:Color.primary)
+   if item.state == .restored,let restoredAt=item.restoredAt{Text("Saved \(restoredAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.caption).foregroundStyle(.secondary)}
+   else if item.state != .cancelled {
+    ProgressView(value:Double(min(model.progress[item.id] ?? item.bytesDownloaded,item.evidence.expectedSize)),total:Double(max(1,item.evidence.expectedSize))).accessibilityLabel("Download progress")
+    Text("\((model.progress[item.id] ?? item.bytesDownloaded).formatted(.byteCount(style:.file))) of \(item.evidence.expectedSize.formatted(.byteCount(style:.file))) downloaded").font(.caption).foregroundStyle(.secondary)
+   }
+   if let code=item.lastErrorCode {Text(restoreGuidance(code)).font(.subheadline).foregroundStyle(.secondary)}
+   if ![.restored,.saving,.reconcile,.cancelled].contains(item.state) {
+    ViewThatFits(in:.horizontal){HStack{restoreActions(item)};VStack(alignment:.leading){restoreActions(item)}}.buttonStyle(.bordered)
+   }
+   DisclosureGroup("Details & support") {
+    VStack(alignment:.leading,spacing:6) {
+     Text("Transfer reference: R-\(item.id.uuidString.prefix(8))").textSelection(.enabled)
+     Text("Last updated \(item.updatedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))")
+     if let code=item.lastErrorCode{Text(code).textSelection(.enabled)}
+    }.font(.caption).foregroundStyle(.secondary)
+   }.font(.caption)
+  }.padding(.vertical,10)
+ }
+ private func compoundRow(_ record:CompoundRestoreRecord)->some View {
+  VStack(alignment:.leading,spacing:12) {
+   AcloudMediaHeader(type:record.plan.manifest.mediaType,reference:record.plan.manifest.id,localID:model.localPreviewID(forManifest:record.plan.manifest.id),dateLabel:"Restore requested",date:record.createdAt,detail:"\(record.plan.resources.count) files · \(record.plan.manifest.kind.rawValue.replacingOccurrences(of:"_",with:" ").capitalized)")
+   Text(record.state.displayTitle).font(.subheadline.weight(.semibold))
+   if ![.restored,.saving,.reconcile,.cancelled].contains(record.state) {
+    HStack{Button("Pause"){Task{await model.compoundControl(record,"pause")}};Button("Retry"){Task{await model.compoundControl(record,"resume")}};Button("Cancel",role:.destructive){Task{await model.compoundControl(record,"cancel")}}}.buttonStyle(.bordered)
+   }
+   DisclosureGroup("Details & support"){Text("Transfer reference: R-\(record.id.uuidString.prefix(8))").font(.caption).textSelection(.enabled)}
+  }.padding(.vertical,10)
+ }
+ @ViewBuilder private func variantActions(_ id:UUID)->some View {
+  Button("Restore original"){Task{await model.restoreVariant(id,choice:.original)}}
+  Button("Restore rendered edit"){Task{await model.restoreVariant(id,choice:.edited)}}
+ }
+ @ViewBuilder private func restoreActions(_ item:RestoreItem)->some View {
+  if [.paused,.retryable,.permanent].contains(item.state){Button("Resume / Retry"){Task{await model.control(item,"resume")}}}
+  else{Button("Pause"){Task{await model.control(item,"pause")}}}
+  Button("Cancel",role:.destructive){Task{await model.control(item,"cancel")}}
+ }
+ private func restoreGuidance(_ code:String)->String {
+  if code.hasPrefix("PHOTOS_SAVE_ERROR_"){return "Photos reported a save error (code \(code.dropFirst(18))). This copy is unconfirmed; review before restoring again."}
+  if code=="SAVE_RESULT_UNCERTAIN"{return "Photos may already contain this copy. Review before restoring again."}
+  if code=="INTEGRITY_FAILED"{return "Downloaded bytes failed integrity checks."}
+  if code=="PHOTOS_PERMISSION_REQUIRED"{return "Allow Photos additions to continue."}
+  return "Restore paused or requires a retry."
+ }
 }

@@ -7,6 +7,17 @@ import Photos
 #endif
 @testable import RestoreEngine
 final class RestoreTests:RestoreTestBase{
+ func testProtectedInventoryDatesDecodeWithoutBreakingOlderResponses()throws{
+  let id=UUID().uuidString
+  let legacy=Data("{\"id\":\"\(id)\",\"mediaType\":\"image\",\"sizeBytes\":128}".utf8)
+  XCTAssertNil(try JSONDecoder().decode(ProtectedRestoreAsset.self,from:legacy).protectedAt)
+  let dated=Data("{\"id\":\"\(id)\",\"mediaType\":\"video\",\"sizeBytes\":256,\"protectedAt\":\"2026-10-15T12:00:00.000Z\",\"captureDate\":null,\"durationSeconds\":12.5}".utf8)
+  let asset=try JSONDecoder().decode(ProtectedRestoreAsset.self,from:dated)
+  XCTAssertEqual(asset.protectedAt,"2026-10-15T12:00:00.000Z")
+  XCTAssertEqual(asset.durationSeconds,12.5)
+  XCTAssertNil(asset.captureDate)
+ }
+
  func testTypedPhotoSaveFilePreservesBytesAndVerifiedDownload()throws{let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)};let original=root.appendingPathComponent("verified.bin"),bytes=Data([137,80,78,71,13,10,26,10,42]);try bytes.write(to:original);let typed=try PhotoSaveFile(file:original,uti:"public.png");XCTAssertEqual(typed.url.pathExtension,"png");XCTAssertEqual(try Data(contentsOf:typed.url),bytes);typed.remove();XCTAssertFalse(FileManager.default.fileExists(atPath:typed.url.path));XCTAssertEqual(try Data(contentsOf:original),bytes);XCTAssertThrowsError(try PhotoSaveFile(file:original,uti:"unknown"))}
  func testPhotoRestoreCreatesNewLocalCopy()async throws{let f=try await fixture();try await f.engine.run(f.item.id);try await assertState(f,.restored);let saves=await f.photos.saves;XCTAssertEqual(saves,1)}
  func testVideoRestoreCreatesNewLocalCopy()async throws{let f=try await fixture(media:"video");try await f.engine.run(f.item.id);try await assertState(f,.restored)}
