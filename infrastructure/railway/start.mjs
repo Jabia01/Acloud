@@ -1,5 +1,5 @@
-import {X509Certificate} from 'node:crypto';
-import {mkdir,writeFile,lstat} from 'node:fs/promises';
+import {X509Certificate,randomUUID} from 'node:crypto';
+import {mkdir,writeFile,lstat,rename,unlink} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 export function check(e,role){
@@ -14,9 +14,19 @@ export function check(e,role){
  if(role==='migrate'&&decodeURIComponent(db.username)!==e.BETA_MIGRATION_ROLE)throw new Error('Separate bound migration role required');
  return true;
 }
+// A container restart may retain /tmp. Replace the public CA atomically without
+// following an existing link or exposing a partially written certificate.
+export async function writeDatabaseCa(dir,ca){
+ await mkdir(dir,{recursive:true,mode:0o700});const st=await lstat(dir);
+ if(!st.isDirectory()||st.isSymbolicLink()||(st.mode&0o077)||st.uid!==process.getuid())throw new Error('Unsafe config directory');
+ const target=dir+'/database-ca.pem';
+ try{const current=await lstat(target);if(!current.isFile()||current.isSymbolicLink()||(current.mode&0o077)||current.uid!==process.getuid())throw new Error('Unsafe certificate file');}catch(error){if(error.code!=='ENOENT')throw error;}
+ const temporary=dir+'/database-ca.'+randomUUID()+'.tmp';
+ try{await writeFile(temporary,ca,{mode:0o600,flag:'wx'});await rename(temporary,target);}finally{await unlink(temporary).catch(error=>{if(error.code!=='ENOENT')throw error;});}
+ return target;
+}
 export async function prepare(e,role){check(e,role);const ca=e.DATABASE_CA_PEM??(e.DATABASE_CA_PEM_BASE64?Buffer.from(e.DATABASE_CA_PEM_BASE64,'base64').toString('utf8'):undefined);if(!ca||!ca.includes('-----BEGIN CERTIFICATE-----'))throw new Error('Database CA PEM required');new X509Certificate(ca);
- const dir='/tmp/backup-railway-config';await mkdir(dir,{recursive:true,mode:0o700});const s=await lstat(dir);if(!s.isDirectory()||s.isSymbolicLink()||(s.mode&0o077))throw new Error('Unsafe config directory');
- await writeFile(dir+'/database-ca.pem',ca,{mode:0o600,flag:'wx'});e.DATABASE_CA_FILE=dir+'/database-ca.pem';delete e.DATABASE_CA_PEM;delete e.DATABASE_CA_PEM_BASE64;
+ e.DATABASE_CA_FILE=await writeDatabaseCa('/tmp/backup-railway-config',ca);delete e.DATABASE_CA_PEM;delete e.DATABASE_CA_PEM_BASE64;
  if(role!=='migrate'){if(e.RAILWAY_VOLUME_MOUNT_PATH!=='/data')throw new Error('Persistent /data volume required');for(const name of ['ledger','audit']){await mkdir('/data/'+name,{recursive:true,mode:0o700});const st=await lstat('/data/'+name);if(!st.isDirectory()||st.isSymbolicLink()||(st.mode&0o077))throw new Error('Private persistent directory required');}e.LIFECYCLE_LEDGER_DIR='/data/ledger';e.AUDIT_ARCHIVE_DIR='/data/audit';}
  if(role==='api')e.API_PORT=e.PORT??e.API_PORT;
 }
