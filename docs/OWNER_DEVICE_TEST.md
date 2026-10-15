@@ -25,3 +25,11 @@ Do not move the start time or clear bindings casually to recover a failed test: 
 ## Validation
 
 API TypeScript build; dedicated isolated-local-PostgreSQL tests in apps/api/test/owner-device-test.test.mjs; existing beta/admission/local restore regression suites; HealthClient Swift tests; full iOS Debug compilation. Provider fixture tests do not prove live B2 throughput or physical Photos acceptance. No live setting change is implied by passing these tests.
+
+## Approved project-testing profile
+
+Set `OWNER_DEVICE_TEST_PROFILE=project` only for the owner-approved month of testing. The default/absent profile remains `smoke` with its original two-item, 64 MiB, 24-hour maximum. Unknown profiles fail closed.
+
+The project profile permits a fixed start/end window of at most 31 days, up to 100 upload attempts and 1 GiB total (1,073,741,824 bytes). Failed/cancelled attempts count. The 32 MiB per-file limit, ordinary account quota, private staging resource binding, single account/device, live verified session, operation pause switches and integrity verification remain enforced. No public beta, payment or deletion feature is enabled. Restore catalog includes up to the full approved 100 items; restore still requires its existing explicit switch and verified evidence.
+
+Deploy this code before changing the API service variables. Set the profile, enabled flag and explicit UTC start/end together, preserving account/device/resource bindings. Never extend a window implicitly. Close early using `OWNER_DEVICE_TEST_ENABLED=false`; expiry also stops new authorizations and caps signed-link lifetimes. Existing backups are not deleted at expiry. Worker settings need no change. Do not reset the start date to evade attempt accounting.

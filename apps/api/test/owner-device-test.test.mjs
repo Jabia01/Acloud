@@ -44,6 +44,7 @@ describe('private owner device staging mode',{concurrency:false},()=>{
    await pool.query("INSERT INTO sessions(id,user_id,device_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')",[p.sessionId,p.userId,p.deviceId,randomUUID().replaceAll('-','').repeat(2)]);
    await pool.query('INSERT INTO development_entitlements(user_id,quota_bytes) VALUES($1,67108864)',[p.userId]);
    await pool.query("UPDATE beta_switches SET blocked=false WHERE name IN ('uploads','multipart','downloads','restore')");
+   delete process.env.OWNER_DEVICE_TEST_PROFILE;
    for(const key of off)process.env[key]='false';
    Object.assign(process.env,{NODE_ENV:'production',APP_ENV:'staging',STORAGE_ENVIRONMENT:'staging',STORAGE_PROVIDER:'backblaze_b2',B2_BUCKET_NAME:'owner-test-fixture',BETA_EXPECTED_BUCKET:'owner-test-fixture',API_PUBLIC_ORIGIN:'https://api.example.invalid',B2_S3_ENDPOINT:'https://s3.eu-central-003.backblazeb2.com',OWNER_DEVICE_TEST_ENABLED:'true',OWNER_DEVICE_TEST_ACCOUNT_ID:p.userId,OWNER_DEVICE_TEST_DEVICE_ID:p.deviceId,OWNER_DEVICE_TEST_STARTS_AT:new Date(Date.now()-1000).toISOString(),OWNER_DEVICE_TEST_EXPIRES_AT:new Date(Date.now()+3600000).toISOString()});
    process.env.OWNER_DEVICE_TEST_RESOURCE_HASH=ownerTestBinding(process.env);
@@ -54,6 +55,40 @@ describe('private owner device staging mode',{concurrency:false},()=>{
  for(const key of off)test('refuses broader feature '+key,()=>{process.env[key]='true';assert.throws(()=>ownerTestConfiguration());});
  for(const patch of [{APP_ENV:'production'},{NODE_ENV:'development'},{STORAGE_PROVIDER:'minio'},{STORAGE_ENVIRONMENT:'production'},{B2_BUCKET_NAME:'acloud-prod-media'},{B2_S3_ENDPOINT:'http://localhost:9000'},{OWNER_DEVICE_TEST_RESOURCE_HASH:'0'.repeat(64)},{OWNER_DEVICE_TEST_ENABLED:'yes'}])test('rejects unsafe binding '+Object.keys(patch)[0],()=>{Object.assign(process.env,patch);assert.throws(()=>ownerTestConfiguration());});
  test('future, expired and overlong windows rejected',()=>{const cfg=ownerTestConfiguration();assert.throws(()=>ownerTestIdentity(p,process.env,cfg.start-1));assert.throws(()=>ownerTestIdentity(p,process.env,cfg.end));process.env.OWNER_DEVICE_TEST_EXPIRES_AT=new Date(cfg.start+86400001).toISOString();assert.throws(()=>ownerTestConfiguration());});
+ test('project profile permits 31 days and rejects longer or unknown profiles',()=>{
+  process.env.OWNER_DEVICE_TEST_PROFILE='project';const start=Date.now()-1000;
+  process.env.OWNER_DEVICE_TEST_STARTS_AT=new Date(start).toISOString();
+  process.env.OWNER_DEVICE_TEST_EXPIRES_AT=new Date(start+31*86400000).toISOString();
+  const cfg=ownerTestIdentity(p);assert.equal(cfg.maxFiles,100);assert.equal(cfg.maxBytes,1073741824);
+  assert.throws(()=>ownerTestIdentity({...p,deviceId:randomUUID()}));
+  assert.throws(()=>ownerTestIdentity(p,process.env,cfg.end));
+  process.env.OWNER_DEVICE_TEST_EXPIRES_AT=new Date(start+31*86400000+1).toISOString();assert.throws(()=>ownerTestConfiguration());
+  process.env.OWNER_DEVICE_TEST_PROFILE='unlimited';assert.throws(()=>ownerTestConfiguration());
+ });
+ test('project profile admits three verified backups and includes all in restore',async()=>{
+  process.env.OWNER_DEVICE_TEST_PROFILE='project';
+  for(let i=0;i<3;i++)await protectedAsset();
+  assert.equal((await restore.status(p)).OWNER_DEVICE_TEST_ASSET_IDS.length,3);
+  process.env.OWNER_DEVICE_TEST_ENABLED='false';await assert.rejects(uploads.create(p,input(),randomUUID()));
+ });
+ test('project profile still enforces ordinary quota',async()=>{
+  process.env.OWNER_DEVICE_TEST_PROFILE='project';
+  await pool.query('UPDATE entitlements SET quota_bytes=10 WHERE user_id=$1',[p.userId]);await assert.rejects(uploads.create(p,input(),randomUUID()));
+ });
+ test('project allowance enforces 100 attempts and 1 GiB including cancelled attempts',async()=>{
+  process.env.OWNER_DEVICE_TEST_PROFILE='project';
+  const {ownerTestUpload}=require('../dist/beta/owner-test.js');let count=99,bytes=1073741724;
+  const client={query:async(sql)=>{
+   if(sql.includes('FROM sessions'))return {rowCount:1,rows:[{}]};
+   if(sql.includes('FROM beta_switches'))return {rows:[{name:'uploads',blocked:false},{name:'multipart',blocked:false}]};
+   if(sql.includes('idempotency_key'))return {rows:[]};
+   if(sql.includes('count(*)')){assert.ok(!sql.includes("status="));return {rows:[{count,bytes:String(bytes)}]};}
+   throw Error('Unexpected query');
+  }};
+  await ownerTestUpload(client,p,{...input(),key:randomUUID()});
+  count=100;await assert.rejects(ownerTestUpload(client,p,{...input(),key:randomUUID()}));
+  count=99;bytes++;await assert.rejects(ownerTestUpload(client,p,{...input(),key:randomUUID()}));
+ });
  test('wrong account, wrong device and browser sessions denied',async()=>{for(const patch of [{userId:randomUUID()},{deviceId:randomUUID()},{deviceId:null}])await assert.rejects(uploads.create({...p,...patch},input(),randomUUID()));});
  test('revoked session and device denied before signing',async()=>{await pool.query('UPDATE sessions SET revoked_at=now() WHERE id=$1',[p.sessionId]);await assert.rejects(uploads.create(p,input(),randomUUID()));await pool.query('UPDATE sessions SET revoked_at=NULL WHERE id=$1',[p.sessionId]);await pool.query('UPDATE devices SET revoked_at=now() WHERE id=$1',[p.deviceId]);await assert.rejects(uploads.create(p,input(),randomUUID()));});
  test('unverified and abuse-reviewed accounts denied',async()=>{await pool.query('UPDATE users SET email_verified_at=NULL WHERE id=$1',[p.userId]);await assert.rejects(uploads.create(p,input(),randomUUID()));await pool.query('UPDATE users SET email_verified_at=now(),abuse_review=true WHERE id=$1',[p.userId]);await assert.rejects(uploads.create(p,input(),randomUUID()));});

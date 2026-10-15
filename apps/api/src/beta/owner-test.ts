@@ -29,10 +29,15 @@ export function ownerTestConfiguration(e:NodeJS.ProcessEnv=process.env){
   if(e.NODE_ENV!=='production'||e.APP_ENV!=='staging'||e.STORAGE_ENVIRONMENT!=='staging'||e.STORAGE_PROVIDER!=='backblaze_b2'||off.some(k=>e[k]!=='false')||e.NODE_TLS_REJECT_UNAUTHORIZED==='0')throw deny();
   if(!e.B2_BUCKET_NAME||e.B2_BUCKET_NAME==='acloud-prod-media'||e.B2_BUCKET_NAME!==e.BETA_EXPECTED_BUCKET||e.OWNER_DEVICE_TEST_RESOURCE_HASH!==ownerTestBinding(e))throw deny();
   for(const key of ['API_PUBLIC_ORIGIN','B2_S3_ENDPOINT']){const u=new URL(e[key]!);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw deny();}
+  const profile=e.OWNER_DEVICE_TEST_PROFILE??'smoke';
+  if(!['smoke','project'].includes(profile))throw deny();
+  const maxDuration=profile==='project'?31*24*3600*1000:24*3600*1000;
+  const maxFiles=profile==='project'?100:OWNER_TEST_FILES;
+  const maxBytes=profile==='project'?1024*1024*1024:OWNER_TEST_TOTAL_BYTES;
   const account=e.OWNER_DEVICE_TEST_ACCOUNT_ID??'',device=e.OWNER_DEVICE_TEST_DEVICE_ID??'';
   const start=Date.parse(e.OWNER_DEVICE_TEST_STARTS_AT??''),end=Date.parse(e.OWNER_DEVICE_TEST_EXPIRES_AT??'');
-  if(!uuid.test(account)||!uuid.test(device)||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||end-start>24*3600*1000)throw deny();
-  return {account,device,start,end};
+  if(!uuid.test(account)||!uuid.test(device)||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||end-start>maxDuration)throw deny();
+  return {account,device,start,end,maxFiles,maxBytes};
 }
 export function ownerTestIdentity(p:Principal,e:NodeJS.ProcessEnv=process.env,now=Date.now()){
   const cfg=ownerTestConfiguration(e);
@@ -58,7 +63,7 @@ export async function ownerTestUpload(c:PoolClient,p:Principal,input?:UploadInpu
   if(old.rows[0]){const a=old.rows[0];if(a.device_id!==cfg.device||new Date(a.created_at).getTime()<cfg.start||new Date(a.created_at).getTime()>=cfg.end)throw deny();return;}
   // Count cancelled/failed attempts too. Existing per-user transaction lock serializes reservations.
   const usage=(await c.query('SELECT count(*)::int AS count,COALESCE(sum(expected_size_bytes),0)::text AS bytes FROM assets WHERE user_id=$1 AND created_at >= $2',[p.userId,new Date(cfg.start)])).rows[0];
-  if(Number(usage.count)>=OWNER_TEST_FILES||BigInt(usage.bytes)+BigInt(input.size)>BigInt(OWNER_TEST_TOTAL_BYTES))throw new ConflictException('Private test allowance reached');
+  if(Number(usage.count)>=cfg.maxFiles||BigInt(usage.bytes)+BigInt(input.size)>BigInt(cfg.maxBytes))throw new ConflictException('Private test allowance reached');
 }
 export async function ownerTestAsset(c:PoolClient,p:Principal,id:string,operations:string[]){
   const cfg=await ownerTestAccess(c,p,operations);
@@ -72,5 +77,5 @@ export async function ownerTestRestoreIds(c:PoolClient,p:Principal){
   return (await c.query(`SELECT a.id FROM assets a JOIN upload_sessions s ON s.asset_id=a.id AND s.user_id=a.user_id
     WHERE a.user_id=$1 AND a.device_id=$2 AND a.created_at >= $3 AND a.created_at < $4
     AND a.storage_provider='backblaze_b2' AND a.status='PROTECTED' AND a.privacy_deleted_at IS NULL
-    AND a.media_type IN ('image','video') AND a.expected_size_bytes BETWEEN 1 AND $5 ORDER BY a.created_at LIMIT 2`,[p.userId,cfg.device,new Date(cfg.start),new Date(cfg.end),OWNER_TEST_FILE_BYTES])).rows.map(r=>r.id as string);
+    AND a.media_type IN ('image','video') AND a.expected_size_bytes BETWEEN 1 AND $5 ORDER BY a.created_at LIMIT $6`,[p.userId,cfg.device,new Date(cfg.start),new Date(cfg.end),OWNER_TEST_FILE_BYTES,cfg.maxFiles])).rows.map(r=>r.id as string);
 }
