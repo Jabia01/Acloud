@@ -150,7 +150,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   await observeTransferAlerts()
   try await e.reconcileStartup()
   #if DEBUG
-  message=canSelectOriginals ? "Development test: explicitly choose one disposable still photo. Keep the original. Real-device validation remains pending." : (photoTestEnabled ? "Photo test unavailable: could not confirm this signed-in device. Open Account and sign in again, then return here." : "Photo test flag missing in this installed build. Run the updated Debug build from Xcode.")
+  message=canSelectOriginals ? "Development test: explicitly choose up to 10 disposable ordinary photos or short videos. Keep the original. Real-device validation remains pending." : (photoTestEnabled ? "Photo test unavailable: could not confirm this signed-in device. Open Account and sign in again, then return here." : "Photo test flag missing in this installed build. Run the updated Debug build from Xcode.")
   if (try? await accountAPI.ownerDeviceTestRestoreAssets()) != nil {
    message="Private staging test for this account and device. Keep each item under 32 MB and keep your originals."
   }
@@ -210,30 +210,57 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   #endif
  }
  func updateOriginalPolicy() async {await action{var policy=BackupPolicy();policy.allowICloudOriginals=self.allowICloudOriginals;try await self.engine?.setPolicy(policy)}}
- func enqueueSelected(_ ids:[String]) async {
+ func enqueueSelected(_ ids:[String],unavailableCount:Int=0) async {
+  guard !busy else{return}
   transferAnchor=nil
-  guard !ids.isEmpty else{selectionNotice="Photos did not provide access to that selection. Check Acloud’s Photos access in Settings, then choose the item again.";return}
-  #if DEBUG
+  guard BackupSelectionPolicy.normalized(ids,unavailableCount:unavailableCount) != nil else{
+   selectionNotice="Choose up to 10 photos or videos. If Photos could not provide access, check Acloud’s Photos access in Settings.";return
+  }
   await action(selection:true) {
-   guard self.canSelectOriginals,ids.count==1,let id=ids.first,let queue=self.queue,let account=self.accountID.flatMap(UUID.init(uuidString:)),let device=self.deviceID,let library=self.library else{throw BackupFailure.authorization}
-   let descriptor=try await PhotoKitOriginalSource().describe(id)
-   guard descriptor.supported,["image","video"].contains(descriptor.mediaType) else {self.selectionNotice="Choose one ordinary photo or unedited video. Live Photos, RAW, and edited media are excluded from this test.";return}
-   if descriptor.mediaType == "video" {guard let duration=descriptor.duration,duration>0,duration<=30 else{self.selectionNotice="Choose a short test video of 30 seconds or less.";return}}
-   var item=BackupItem(libraryID:library,localAssetIdentifier:id,mediaType:descriptor.mediaType)
-   item.accountID=account;item.deviceID=device
-   let queuedID=try await queue.enqueue(item)
-   if queuedID != item.id {
-    let existing=try await queue.read(queuedID)
-    self.selectionNotice="This item is already in your transfers (B-\(queuedID.uuidString.prefix(8))). Status: \(existing?.state.displayTitle ?? "In queue"). No duplicate was added."
-   } else {self.selectionNotice="Added to your transfers (B-\(queuedID.uuidString.prefix(8)))."}
+   guard self.canSelectOriginals,let queue=self.queue,let account=self.accountID.flatMap(UUID.init(uuidString:)),let device=self.deviceID,let library=self.library else{throw BackupFailure.authorization}
+   #if !DEBUG
+   guard let store=self.manifestStore,let api=self.manifestAPI else{throw BackupFailure.missing}
+   let binding=ManifestBinding(accountID:account,deviceID:device,libraryID:library)
+   let planner=MultiResourceBackupPlanner(store:store,queue:queue)
+   #endif
+   guard let summary=await BackupSelectionPolicy.process(ids,unavailableCount:unavailableCount,operation:{id in
+    guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library else{return .failed}
+    do {
+     #if DEBUG
+     let descriptor=try await PhotoKitOriginalSource().describe(id)
+     guard descriptor.supported,["image","video"].contains(descriptor.mediaType) else{return .unsupported}
+     if descriptor.mediaType == "video" {guard let duration=descriptor.duration,duration>0,duration<=30 else{return .unsupported}}
+     guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library else{return .failed}
+     var item=BackupItem(libraryID:library,localAssetIdentifier:id,mediaType:descriptor.mediaType)
+     item.accountID=account;item.deviceID=device
+     let queuedID=try await queue.enqueue(item)
+     return queuedID==item.id ? .added:.existing
+     #else
+     if try await queue.find(library:library,localID:id) != nil{return .existing}
+     let snapshot=try await PhotoKitMediaSource().snapshot(id)
+     let manifest=try await planner.captureExplicit(source:snapshot,binding:binding)
+     _=try await api.createManifest(manifest)
+     guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library else{return .failed}
+     var hasNewResource=false
+     for resource in manifest.resources where resource.status != "PROTECTED" {
+      if try await queue.read(resource.id) == nil{hasNewResource=true}
+     }
+     _=try await planner.enqueue(manifest,binding:binding)
+     return hasNewResource ? .added:.existing
+     #endif
+    }catch let failure as BackupFailure {
+     switch failure {case .inaccessible:return .inaccessible;case .unsupported:return .unsupported;default:return .failed}
+    }catch let failure as ManifestFailure {
+     switch failure {case .unsupported,.fidelityPending:return .unsupported;default:return .failed}
+    }catch{return .failed}
+   }) else{throw BackupFailure.authorization}
+   self.selectionNotice=summary.message
+   #if DEBUG
+   if summary.unsupported>0{self.selectionNotice=summary.message+" Choose ordinary photos or unedited videos up to 30 seconds. Live Photos, RAW and edited media remain excluded from this test."}
+   #endif
   }
-  #else
-  await action(selection:true){
-   guard self.canSelectOriginals,ids.count<=10,let queue=self.queue,let account=self.accountID.flatMap(UUID.init(uuidString:)),let device=self.deviceID,let library=self.library else{throw BackupFailure.authorization}
-   guard let store=self.manifestStore,let api=self.manifestAPI else{throw BackupFailure.missing};let binding=ManifestBinding(accountID:account,deviceID:device,libraryID:library),planner=MultiResourceBackupPlanner(store:store,queue:queue);for id in Set(ids){let snapshot=try await PhotoKitMediaSource().snapshot(id);let manifest=try await planner.captureExplicit(source:snapshot,binding:binding);_=try await api.createManifest(manifest);_=try await planner.enqueue(manifest,binding:binding)}
-  }
-  #endif
  }
+
  func reconcileManifests()async{
   guard let store=manifestStore,let api=manifestAPI,let binding=preservationBinding else{return}
   guard let page=try? await store.page(binding:binding,after:manifestReconcileCursor,limit:50) else{return}
@@ -298,15 +325,15 @@ struct BackupQueueView:View {
      }.acloudFeatureRow()
     }
     Section("Add a backup") {
-     #if DEBUG
-     HStack {
-      Button {pickerSelection = .photo} label:{Label("Choose photo",systemImage:"photo.badge.plus")}
-      Button {pickerSelection = .video} label:{Label("Choose video",systemImage:"video.badge.plus")}
-     }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
-     Text("Private device test: choose one disposable photo or an unedited video up to 30 seconds. Originals are kept.").font(.footnote).foregroundStyle(.secondary)
-     #else
      Button {pickerSelection = .originals} label:{Label("Choose photos and videos",systemImage:"plus.circle.fill").frame(maxWidth:.infinity)}
       .buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
+     Text("Select up to 10 items, then tap Add in Photos to queue your selection. Originals are kept.").font(.footnote).foregroundStyle(.secondary)
+     #if DEBUG
+     HStack {
+      Button {pickerSelection = .photo} label:{Label("Photos only",systemImage:"photo.badge.plus")}
+      Button {pickerSelection = .video} label:{Label("Videos only",systemImage:"video.badge.plus")}
+     }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
+     Text("Private device test: ordinary photos and unedited videos up to 30 seconds. The existing account, device and upload limits still apply.").font(.footnote).foregroundStyle(.secondary)
      #endif
      Toggle("Download iCloud originals on Wi-Fi",isOn:$model.allowICloudOriginals).onChange(of:model.allowICloudOriginals){_,_ in Task{await model.updateOriginalPolicy()}}
      Text("iCloud downloads happen only when you allow them. Selecting library access does not start a backup.").font(.footnote).foregroundStyle(.secondary)
@@ -355,7 +382,7 @@ struct BackupQueueView:View {
     }
     #endif
    }.acloudCanvas().navigationTitle("Backup")
-  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(videoOnly:selection == .video){ids in pickerSelection=nil;guard let ids else{return};transferFilter = .all;Task{await model.enqueueSelected(ids)}}.id(selection.id)}
+  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(filter:selection == .video ? .videos:selection == .photo ? .images:.any(of:[.images,.videos])){result in pickerSelection=nil;guard let result else{return};transferFilter = .all;Task{await model.enqueueSelected(result.identifiers,unavailableCount:result.unavailableCount)}}.id(selection.id)}
    .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
    .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
  }
@@ -396,16 +423,22 @@ struct BackupQueueView:View {
 }
 
 private struct OriginalAssetPicker:UIViewControllerRepresentable {
- let videoOnly:Bool
- let selected:([String]?)->Void
+ let filter:PHPickerFilter
+ let selected:(BackupPickerSelection?)->Void
  func makeCoordinator()->Coordinator{Coordinator(selected:selected)}
- func makeUIViewController(context:Context)->PHPickerViewController{var config=PHPickerConfiguration(photoLibrary:.shared());
-  #if DEBUG
-  config.filter = videoOnly ? .videos:.images;config.selectionLimit=1
-  #else
-  config.filter = .any(of:[.images,.videos]);config.selectionLimit=10
-  #endif
-  let picker=PHPickerViewController(configuration:config);picker.delegate=context.coordinator;return picker}
+ func makeUIViewController(context:Context)->PHPickerViewController{
+  var config=PHPickerConfiguration(photoLibrary:.shared())
+  config.filter=filter;config.selectionLimit=BackupSelectionPolicy.maximum;config.selection = .ordered
+  let picker=PHPickerViewController(configuration:config);picker.delegate=context.coordinator;return picker
+ }
  func updateUIViewController(_ controller:PHPickerViewController,context:Context){}
- final class Coordinator:NSObject,PHPickerViewControllerDelegate{let selected:([String]?)->Void;init(selected:@escaping([String]?)->Void){self.selected=selected};func picker(_ picker:PHPickerViewController,didFinishPicking results:[PHPickerResult]){selected(results.isEmpty ? nil:results.compactMap(\.assetIdentifier))}}
+ final class Coordinator:NSObject,PHPickerViewControllerDelegate {
+  let selected:(BackupPickerSelection?)->Void
+  init(selected:@escaping(BackupPickerSelection?)->Void){self.selected=selected}
+  func picker(_ picker:PHPickerViewController,didFinishPicking results:[PHPickerResult]) {
+   guard !results.isEmpty else{selected(nil);return}
+   let identifiers=results.compactMap(\.assetIdentifier)
+   selected(BackupPickerSelection(identifiers:identifiers,unavailableCount:results.count-identifiers.count))
+  }
+ }
 }
