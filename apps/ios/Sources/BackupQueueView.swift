@@ -69,6 +69,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  @Published var message="Sign in to open the development queue."
  @Published var busy=false
  @Published var canSelectOriginals=false
+ @Published private(set) var complexBackupTestAvailable=false
  @Published var originalProgress:Double=0
  @Published var selectionNotice:String?
  @Published var hasOlderTransfers=false
@@ -107,7 +108,11 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   if accountID==account.id,let deviceID {boundDevice=deviceID}
   else {boundDevice=photoTestEnabled ? try? await accountAPI.currentDeviceID() : nil}
   let photoAccessReady=photoTestEnabled && boundDevice != nil
-  if engine != nil,accountID==account.id,canSelectOriginals==photoAccessReady{return}
+  var complexTestReady=false
+  if photoAccessReady,Bundle.main.object(forInfoDictionaryKey:"DevelopmentComplexMediaBackup") as? Bool == true {
+   complexTestReady=(try await accountAPI.ownerDeviceTestRestoreAssets()) != nil
+  }
+  if engine != nil,accountID==account.id,canSelectOriginals==photoAccessReady,complexBackupTestAvailable==complexTestReady{return}
   #else
   if engine != nil,accountID==account.id,deviceID==boundDevice{return}
   #endif
@@ -134,7 +139,16 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   #if DEBUG
   deviceID=boundDevice
   canSelectOriginals=photoAccessReady
-  let preparer:any ResourcePreparer=DevelopmentTestPreparer(generated:GeneratedResourcePreparer(sourceDirectory:source!,files:files),photos:PhotoKitResourcePreparer(files:files,developmentEnabled:canSelectOriginals))
+  complexBackupTestAvailable=complexTestReady
+  let ordinary=DevelopmentTestPreparer(generated:GeneratedResourcePreparer(sourceDirectory:source!,files:files),photos:PhotoKitResourcePreparer(files:files,developmentEnabled:canSelectOriginals))
+  let preparer:any ResourcePreparer
+  manifestStore=nil;preservationBinding=nil
+  if complexTestReady,let boundDevice {
+   let binding=ManifestBinding(accountID:user,deviceID:boundDevice,libraryID:lib)
+   let store=try ManifestStore(url:root.appendingPathComponent("manifests.sqlite"))
+   manifestStore=store;preservationBinding=binding
+   preparer=PreservationResourcePreparer(ordinary:ordinary,multiple:MultiResourcePreparer(source:PhotoKitMediaSource(),store:store,files:files,binding:binding,invalidate:{id,fingerprint in try? await multipartAPI.invalidateManifest(id,fingerprint:fingerprint)}))
+  }else{preparer=ordinary}
   #else
   let binding=ManifestBinding(accountID:user,deviceID:boundDevice,libraryID:lib),store=try ManifestStore(url:root.appendingPathComponent("manifests.sqlite"))
   manifestStore=store;preservationBinding=binding
@@ -228,6 +242,28 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
     do {
      #if DEBUG
      let descriptor=try await PhotoKitOriginalSource().describe(id)
+     if !descriptor.supported,self.complexBackupTestAvailable {
+      let snapshot=try await PhotoKitMediaSource().snapshot(id)
+      guard OwnerComplexBackupPolicy.permits(snapshot),let store=self.manifestStore,let api=self.manifestAPI,let binding=self.preservationBinding,
+            binding.accountID==account,binding.deviceID==device,binding.libraryID==library else{return .unsupported}
+      var existing:MediaManifest?,cursor:UUID?
+      repeat {
+       let page=try await store.page(binding:binding,after:cursor,limit:100)
+       existing=page.first(where:{$0.source.localID==id && $0.matches(snapshot) && $0.state != .sourceChanged})
+       if existing != nil || page.count<100{break};cursor=page.last?.id
+      }while true
+      let planner=MultiResourceBackupPlanner(store:store,queue:queue)
+      let manifest:MediaManifest
+      if let existing{manifest=existing}else{manifest=try await planner.captureExplicit(source:snapshot,binding:binding)}
+      _=try await api.createManifest(manifest)
+      guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library,self.complexBackupTestAvailable else{return .failed}
+      var newResource=false
+      for resource in manifest.resources where resource.status != "PROTECTED" {
+       if try await queue.read(resource.id)==nil{newResource=true}
+      }
+      _=try await planner.enqueue(manifest,binding:binding)
+      return newResource ? .added:.existing
+     }
      guard descriptor.supported,["image","video"].contains(descriptor.mediaType) else{return .unsupported}
      if descriptor.mediaType == "video" {guard let duration=descriptor.duration,duration>0,duration<=30 else{return .unsupported}}
      guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library else{return .failed}
@@ -256,7 +292,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    }) else{throw BackupFailure.authorization}
    self.selectionNotice=summary.message
    #if DEBUG
-   if summary.unsupported>0{self.selectionNotice=summary.message+" Choose ordinary photos or unedited videos up to 30 seconds. Live Photos, RAW and edited media remain excluded from this test."}
+   if summary.unsupported>0{self.selectionNotice=summary.message+" Choose ordinary photos, short unedited videos, or a complete Live Photo/edited-photo test set when experimental backup is available. RAW, edited videos and unknown formats remain excluded."}
    #endif
   }
  }
@@ -296,7 +332,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    #endif
    defer{self.worker=nil};try? await engine.runDue();await self.refresh()}};await refresh()}catch{message="Waiting for account or API access."}
  }
- func stopForSignOut() async throws{alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
+ func stopForSignOut() async throws{alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;complexBackupTestAvailable=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
  func handleBackground(completion:@escaping @Sendable()->Void) async {
   backgroundCompletion={Task{@MainActor in
    // Drain in-process callbacks before reconciling daemon-completed parts.
@@ -334,6 +370,10 @@ struct BackupQueueView:View {
       Button {pickerSelection = .video} label:{Label("Videos only",systemImage:"video.badge.plus")}
      }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
      Text("Private device test: ordinary photos and unedited videos up to 30 seconds. The existing account, device and upload limits still apply.").font(.footnote).foregroundStyle(.secondary)
+     if model.complexBackupTestAvailable {
+      Label("Live Photo and edited-photo backup testing enabled",systemImage:"flask").font(.subheadline)
+      Text("Start with one disposable Live Photo or edited photo. Every original, rendered edit and required supporting file must verify. Each file counts toward the existing test limits. Originals stay in Photos. Complex restore and edit-history reconstruction are not enabled by this backup test.").font(.footnote).foregroundStyle(.secondary)
+     }
      #endif
      Toggle("Download iCloud originals on Wi-Fi",isOn:$model.allowICloudOriginals).onChange(of:model.allowICloudOriginals){_,_ in Task{await model.updateOriginalPolicy()}}
      Text("iCloud downloads happen only when you allow them. Selecting library access does not start a backup.").font(.footnote).foregroundStyle(.secondary)
@@ -366,7 +406,7 @@ struct BackupQueueView:View {
         AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,localID:manifest.source.localID,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
         Label(manifest.state == .fullyProtected ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files",systemImage:manifest.state == .fullyProtected ? "checkmark.shield.fill":"square.stack.3d.up")
         Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required files protected").font(.caption)
-        DisclosureGroup("Details") {Text("Restoring this format and removing device copies still require beta acceptance.").font(.footnote).foregroundStyle(.secondary)}
+        DisclosureGroup("Details") {Text("All required files must verify together. Live Photo/edited-photo restore is a separate pending test; removing device copies remains disabled.").font(.footnote).foregroundStyle(.secondary)}
        }.padding(.vertical,8)
       }
      }

@@ -74,6 +74,7 @@ targets:
         StorageOrigin: $(STORAGE_ORIGIN)
         DevelopmentSinglePhotoRestore: true
         DevelopmentSinglePhotoBackup: true
+        DevelopmentComplexMediaBackup: true
         DevelopmentBackgroundTransfers: true
         EnableFreeUpSpace: false
         DisposableCleanupContext: false
