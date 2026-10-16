@@ -162,6 +162,56 @@ final class BackupEngineTests:XCTestCase {
   let(q,e,_,t,item,_,_)=try await fixture(bytes:100);try await e.setNetwork(NetworkSnapshot(cellular:true,wifi:false));try await e.run(item.id)
   let result=try await q.read(item.id);let parts=await t.numbers;XCTAssertEqual(result?.state,.paused);XCTAssertTrue(parts.isEmpty)
  }
+ func testNetworkPauseAutomaticallyResumesOnPermittedConnection()async throws{
+  let(q,e,_,t,item,_,_)=try await fixture(bytes:100)
+  try await e.setNetwork(NetworkSnapshot(connected:false));try await e.runDue()
+  var current=try await q.read(item.id);XCTAssertEqual(current?.lastErrorCode,"NETWORK_POLICY")
+  try await e.runDue();current=try await q.read(item.id);XCTAssertEqual(current?.state,.paused)
+  try await e.setNetwork(NetworkSnapshot(cellular:true,wifi:false));try await e.runDue()
+  current=try await q.read(item.id);XCTAssertEqual(current?.state,.paused)
+  try await e.setNetwork(NetworkSnapshot(constrained:true));try await e.runDue()
+  current=try await q.read(item.id);XCTAssertEqual(current?.state,.paused)
+  try await e.setNetwork(NetworkSnapshot());try await e.runDue()
+  current=try await q.read(item.id);let parts=await t.numbers
+  XCTAssertEqual(current?.state,.protected);XCTAssertEqual(parts,[1])
+ }
+ func testAutomaticNetworkRecoveryRetainsAcceptedMultipartParts()async throws{
+  let(q,e,_,t,item,_,_)=try await fixture()
+  await t.configure(fail:2)
+  do{try await e.run(item.id);XCTFail("Expected interrupted transfer")}catch{}
+  try await e.pause(item.id,reason:"NETWORK_POLICY")
+  try await e.setNetwork(NetworkSnapshot());try await e.runDue()
+  let current=try await q.read(item.id),parts=await t.numbers
+  XCTAssertEqual(current?.state,.protected);XCTAssertEqual(parts,[1,2,2,3])
+ }
+ func testNetworkRecoveryPreservesManualAndResourcePauses()async throws{
+  for reason in ["USER_PAUSED","WAITING_FOR_ICLOUD_ORIGINAL","LOCAL_ACCESS_UNAVAILABLE"]{
+   let(q,e,_,t,item,_,_)=try await fixture(bytes:100)
+   try await e.pause(item.id,reason:reason);try await e.setNetwork(NetworkSnapshot());try await e.runDue()
+   let current=try await q.read(item.id),parts=await t.numbers
+   XCTAssertEqual(current?.state,.paused);XCTAssertEqual(current?.lastErrorCode,reason);XCTAssertTrue(parts.isEmpty)
+  }
+ }
+ func testManualPauseOverridesAutomaticNetworkRecovery()async throws{
+  let(q,e,_,_,item,_,_)=try await fixture(bytes:100)
+  try await e.pause(item.id,reason:"NETWORK_POLICY");try await e.pause(item.id)
+  try await e.setNetwork(NetworkSnapshot());try await e.runDue()
+  let current=try await q.read(item.id);XCTAssertEqual(current?.lastErrorCode,"USER_PAUSED");XCTAssertEqual(current?.state,.paused)
+ }
+ func testNetworkRecoveryWaitsForDaemonTransferToDrain()async throws{
+  let(q,e,_,t,item,_,_)=try await fixture(bytes:100)
+  try await e.pause(item.id,reason:"NETWORK_POLICY");await t.background(item.id)
+  try await e.runDue();let paused=try await q.read(item.id);XCTAssertEqual(paused?.state,.paused)
+  await t.cancel(item:item.id);try await e.runDue()
+  let current=try await q.read(item.id);XCTAssertEqual(current?.state,.protected)
+ }
+ func testNetworkPauseRecoversAfterCoordinatorRestart()async throws{
+  let(q,e,api,t,item,files,d)=try await fixture(bytes:100)
+  try await e.pause(item.id,reason:"NETWORK_POLICY")
+  let restarted=BackupCoordinator(queue:q,api:api,transport:t,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await restarted.setNetwork(NetworkSnapshot());try await restarted.reconcileStartup();try await restarted.runDue()
+  let current=try await q.read(item.id);XCTAssertEqual(current?.state,.protected)
+ }
  func testICloudWaitAndDeniedAccessPauseWithoutDestruction() async throws {
   for denied in [false,true]{let(q,_,api,t,item,files,_)=try await fixture(bytes:100)
    let e=BackupCoordinator(queue:q,api:api,transport:t,preparer:WaitingPreparer(denied:denied),files:files);try await e.setNetwork(NetworkSnapshot());do{try await e.run(item.id)}catch{}

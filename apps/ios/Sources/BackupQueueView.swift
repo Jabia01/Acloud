@@ -24,6 +24,7 @@ private extension BackupState {
 }
 
 private func backupGuidance(_ item:BackupItem)->String? {
+ if item.lastErrorCode == "NETWORK_POLICY" {return "Waiting for an allowed connection. Backup resumes automatically when Wi-Fi returns and Low Data Mode allows transfers."}
  if item.lastErrorCode == "WAITING_FOR_ICLOUD_ORIGINAL" { return "This original is in iCloud. Allow downloads over Wi-Fi, then resume. Your original stays in Photos." }
  if item.lastErrorCode == "SESSION_EXPIRED" { return "Sign in again from Account, then retry this backup." }
  if item.lastErrorCode == "HTTP_503" { return "Acloud is temporarily unavailable. Keep your original and retry later." }
@@ -144,7 +145,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   #if DEBUG
   message=canSelectOriginals ? "Development test: explicitly choose one disposable still photo. Keep the original. Real-device validation remains pending." : (photoTestEnabled ? "Photo test unavailable: could not confirm this signed-in device. Open Account and sign in again, then return here." : "Photo test flag missing in this installed build. Run the updated Debug build from Xcode.")
   if (try? await accountAPI.ownerDeviceTestRestoreAssets()) != nil {
-   message="Private staging test: at most two disposable items, 32 MB each. Keep originals. This is not beta release approval."
+   message="Private staging test for this account and device. Keep each item under 32 MB and keep your originals."
   }
   #else
   message="Choose photos or videos to back up. Keep your originals during beta testing. Support for Live Photos, RAW and edits is still being validated."

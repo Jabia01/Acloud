@@ -16,7 +16,7 @@ public actor BackupCoordinator {
  }
  public func setNetwork(_ value:NetworkSnapshot) async throws {
   network=value
-  for id in Array(active.keys){if let item=try await queue.read(id),!policy.permits(item,network:value){try await pause(id,reason:"NETWORK_POLICY")}}
+  for id in Array(active.keys){if let item=try await queue.read(id),item.state != .paused,!policy.permits(item,network:value){try await pause(id,reason:"NETWORK_POLICY")}}
  }
  public func setPolicy(_ value:BackupPolicy) async throws {policy=value;try await setNetwork(network)}
  public func run(_ id:UUID) async throws {
@@ -201,7 +201,21 @@ public actor BackupCoordinator {
    if try await queue.read(id)==nil{try files.remove(url)}
   }
  }
+ private func resumeNetworkPauses() async throws {
+  try await each { snapshot in
+   guard snapshot.state == .paused,snapshot.lastErrorCode == "NETWORK_POLICY",self.active[snapshot.id] == nil else{return}
+   guard !(await self.transport.activeItemIDs()).contains(snapshot.id),self.active[snapshot.id] == nil else{return}
+   // Recheck after suspension: a user pause or cancellation must win.
+   guard let latest=try await self.queue.read(snapshot.id),latest.state == .paused,
+         latest.lastErrorCode == "NETWORK_POLICY",self.active[snapshot.id] == nil,
+         self.policy.permits(latest,network:self.network) else{return}
+   var ready=latest;ready.state = .queued;ready.nextRetryAt=nil;ready.lastErrorCode=nil
+   _=try await self.queue.save(ready)
+  }
+ }
  public func runDue() async throws {
+  // Recovery waits until the cancelled worker/daemon transfer has drained.
+  try await resumeNetworkPauses()
   for item in try await queue.due(){do{try await run(item.id)}catch{/* Durable sanitized error already recorded; no media logging. */}}
  }
 }
