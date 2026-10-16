@@ -19,6 +19,13 @@ final class RestoreTests:RestoreTestBase{
  }
 
  func testTypedPhotoSaveFilePreservesBytesAndVerifiedDownload()throws{let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)};let original=root.appendingPathComponent("verified.bin"),bytes=Data([137,80,78,71,13,10,26,10,42]);try bytes.write(to:original);let typed=try PhotoSaveFile(file:original,uti:"public.png");XCTAssertEqual(typed.url.pathExtension,"png");XCTAssertEqual(try Data(contentsOf:typed.url),bytes);typed.remove();XCTAssertFalse(FileManager.default.fileExists(atPath:typed.url.path));XCTAssertEqual(try Data(contentsOf:original),bytes);XCTAssertThrowsError(try PhotoSaveFile(file:original,uti:"unknown"))}
+ func testRecentRestoreHistoryPagesByDateAndKeepsAccountScope()async throws{
+  let f=try await fixture();var newest:UUID?
+  for i in 0..<104{let evidence=RestoreEvidence(id:UUID(),cloudVersionId:f.item.evidence.cloudVersionId,mediaType:"image",expectedSize:100,expectedSha256:f.item.evidence.expectedSha256);let id=UUID(uuidString:String(format:"%08X-0000-4000-8000-000000000000",i))!;let item=RestoreItem(accountID:f.item.accountID,libraryID:f.item.libraryID,evidence:evidence,id:id);try await f.queue.enqueue(item);newest=id}
+  let first=try await f.queue.recent(account:f.item.accountID,library:f.item.libraryID);XCTAssertEqual(first.count,100);XCTAssertEqual(first.first?.id,newest)
+  let second=try await f.queue.recent(account:f.item.accountID,library:f.item.libraryID,after:first.last!.id);XCTAssertEqual(second.count,5);XCTAssertTrue(Set(first.map(\.id)).isDisjoint(with:Set(second.map(\.id))))
+  do{_=try await f.queue.recent(account:UUID(),library:f.item.libraryID,after:first.last!.id);XCTFail("Cross-account anchor accepted")}catch{XCTAssertEqual(error as? RestoreFailure,.authorization)}
+ }
  func testPhotoRestoreCreatesNewLocalCopy()async throws{let f=try await fixture();try await f.engine.run(f.item.id);try await assertState(f,.restored);let saves=await f.photos.saves;XCTAssertEqual(saves,1)}
  func testVideoRestoreCreatesNewLocalCopy()async throws{let f=try await fixture(media:"video");try await f.engine.run(f.item.id);try await assertState(f,.restored)}
  func testServerRecheckAlwaysRunsBeforeSave()async throws{let f=try await fixture();try await f.engine.run(f.item.id);let count=await f.api.rechecks;XCTAssertEqual(count,1)}
