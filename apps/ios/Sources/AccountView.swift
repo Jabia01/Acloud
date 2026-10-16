@@ -39,6 +39,7 @@ struct AccountView: View {
                     Text("New passwords require at least 12 characters. Verification and recovery links open on the Acloud website.").font(.footnote)
                 }
             }
+            TransferNotificationSettings()
             Section("Help") {
                 Link("Contact support", destination: URL(string:"mailto:Support247.acloud@useacloud.com")!)
                 Link("Privacy requests", destination: URL(string:"mailto:Privacy247.acloud@useacloud.com")!)
@@ -50,9 +51,10 @@ struct AccountView: View {
     @MainActor private func signIn() async {
         guard let api else { message = "API configuration unavailable."; return }
         busy = true; defer { busy = false }
+        TransferNotifications.shared.signOut()
         await RestoreModel.shared.invalidate()
         await StorageScreen.model.invalidate()
-        do { account = try await api.login(email: email, password: password, deviceIdentifier: deviceIdentifier); password = ""; message = "" }
+        do { try await BackupQueueModel.shared.stopForSignOut(); account = try await api.login(email: email, password: password, deviceIdentifier: deviceIdentifier); password = ""; message = "" }
         catch { message = "Unable to sign in. Check your credentials or connection." }
     }
     @MainActor private func register() async {
@@ -66,7 +68,7 @@ struct AccountView: View {
         busy = true; defer { busy = false }
         await RestoreModel.shared.invalidate()
         await StorageScreen.model.invalidate()
-        do { try await BackupQueueModel.shared.stopForSignOut(); try await api.logout(); account = nil; message = "Signed out." }
+        do { try await BackupQueueModel.shared.stopForSignOut(); try await api.logout(); TransferNotifications.shared.signOut(); account = nil; message = "Signed out." }
         catch { message = "Sign out could not be confirmed. Retry when connected." }
     }
 }

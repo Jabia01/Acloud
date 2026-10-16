@@ -73,6 +73,8 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  @Published var selectionNotice:String?
  @Published var hasOlderTransfers=false
  @Published var showingOlderTransfers=false
+ private var scanningAlerts=false
+ private var alertsSuspended=false
  private var transferAnchor:BackupItem?
  @Published var allowICloudOriginals=false
  private var deviceID:UUID?
@@ -144,6 +146,8 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   queue=q;engine=e;transport=transfer;library=lib;accountID=account.id;monitor=BackupNetworkMonitor(coordinator:e)
   if let completion=backgroundCompletion{transfer.reconnect(completion:completion);backgroundCompletion=nil}
   var policy=BackupPolicy();policy.allowICloudOriginals=allowICloudOriginals;try await e.setPolicy(policy)
+  alertsSuspended=false
+  await observeTransferAlerts()
   try await e.reconcileStartup()
   #if DEBUG
   message=canSelectOriginals ? "Development test: explicitly choose one disposable still photo. Keep the original. Real-device validation remains pending." : (photoTestEnabled ? "Photo test unavailable: could not confirm this signed-in device. Open Account and sign in again, then return here." : "Photo test flag missing in this installed build. Run the updated Debug build from Xcode.")
@@ -155,7 +159,38 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   #endif
  }
  func refresh() async {
-  do{try await connect();if let queue{summary=try await queue.summary();let requestedAnchor=transferAnchor;let page=try await queue.recent(before:requestedAnchor,limit:100);guard transferAnchor?.id==requestedAnchor?.id else{return};items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil};await reconcileManifests()}catch{message="Backup connector unavailable. Device acceptance is pending."}
+  do{try await connect();if let queue{summary=try await queue.summary();let requestedAnchor=transferAnchor;let page=try await queue.recent(before:requestedAnchor,limit:100);guard transferAnchor?.id==requestedAnchor?.id else{return};items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil};await reconcileManifests();await observeTransferAlerts()}catch{message="Backup connector unavailable. Device acceptance is pending."}
+ }
+ // Scan the full durable queue, independently of the visible history page.
+ private func observeTransferAlerts() async {
+  guard !alertsSuspended,!scanningAlerts,let queue,let accountID,let library else{return}
+  scanningAlerts=true;defer{scanningAlerts=false}
+  let scope="backup."+accountID+"."+library.uuidString
+  TransferNotifications.shared.activate(scope)
+  var snapshot:[String:String]=[:],cursor:UUID?
+  do {
+   while true {
+    let page=try await queue.page(after:cursor,limit:100)
+    guard self.accountID==accountID,self.library==library else{return}
+    for item in page where item.mediaType != "test" {
+     // Resource-level protection must not announce a partially protected asset.
+     snapshot[item.id.uuidString]=TransferNotificationPolicy.backupOutcome(state:item.state.rawValue,isResource:item.mediaResourceBinding != nil,error:item.lastErrorCode)
+    }
+    if page.count<100{break};cursor=page.last?.id
+   }
+   if let store=manifestStore,let binding=preservationBinding {
+    cursor=nil
+    while true {
+     let page=try await store.page(binding:binding,after:cursor,limit:100)
+     guard self.accountID==accountID,self.library==library else{return}
+     for manifest in page {
+      snapshot["manifest."+manifest.id.uuidString]=TransferNotificationPolicy.manifestOutcome(state:manifest.state.rawValue)
+     }
+     if page.count<100{break};cursor=page.last?.id
+    }
+   }
+   await TransferNotifications.shared.observe(scope:scope,snapshot:snapshot)
+  } catch { /* Never alter queue state because an alert snapshot failed. */ }
  }
  func loadOlderTransfers()async{guard let last=items.last else{return};transferAnchor=last;await refresh()}
  func loadLatestTransfers()async{transferAnchor=nil;await refresh()}
@@ -234,7 +269,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    #endif
    defer{self.worker=nil};try? await engine.runDue();await self.refresh()}};await refresh()}catch{message="Waiting for account or API access."}
  }
- func stopForSignOut() async throws{worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
+ func stopForSignOut() async throws{alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
  func handleBackground(completion:@escaping @Sendable()->Void) async {
   backgroundCompletion={Task{@MainActor in
    // Drain in-process callbacks before reconciling daemon-completed parts.

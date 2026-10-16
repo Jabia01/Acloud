@@ -4,15 +4,16 @@ import Photos
 import UIKit
 
 struct ContentView: View {
+    @AppStorage("selectedTransferTab") private var selectedTab = "backup"
     @State private var status = "Checking..."
 
     var body: some View {
-        TabView {
-            BackupQueueView().tabItem { Label("Backup", systemImage: "icloud.and.arrow.up") }
-            DiscoveryView().tabItem { Label("Library", systemImage: "photo.on.rectangle") }
-            RestoreView().tabItem { Label("Restore", systemImage: "arrow.down.circle") }
-            StorageView().tabItem { Label("Storage", systemImage: "externaldrive") }
-            AccountView().tabItem { Label("Account", systemImage: "person") }
+        TabView(selection: $selectedTab) {
+            BackupQueueView().tag("backup").tabItem { Label("Backup", systemImage: "icloud.and.arrow.up") }
+            DiscoveryView().tag("library").tabItem { Label("Library", systemImage: "photo.on.rectangle") }
+            RestoreView().tag("restore").tabItem { Label("Restore", systemImage: "arrow.down.circle") }
+            StorageView().tag("storage").tabItem { Label("Storage", systemImage: "externaldrive") }
+            AccountView().tag("account").tabItem { Label("Account", systemImage: "person") }
             #if DEBUG
             VStack(spacing: 16) {
             Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Acloud")
@@ -22,7 +23,7 @@ struct ContentView: View {
                 .accessibilityLabel("API Status: \(status)")
             }
             .padding()
-            .tabItem { Label("Development", systemImage: "heart.text.square") }
+            .tag("development").tabItem { Label("Development", systemImage: "heart.text.square") }
             #endif
         }
         .tint(AcloudStyle.accent)

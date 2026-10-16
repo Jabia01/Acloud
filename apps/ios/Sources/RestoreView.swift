@@ -33,6 +33,8 @@ private extension RestoreState {
  @Published var canRestore=false
  @Published var availableBytes:Int64?
  @Published var progress:[UUID:Int]=[:]
+ private var scanningAlerts=false
+ private var alertsSuspended=true
  private var developmentTestAsset:UUID?
  private var ownerTestAssets:Set<UUID>?
  private var nextCursor:String?,queueCursor:UUID?,queueAnchor:UUID?,account:UUID?,device:UUID?,library:UUID?
@@ -60,9 +62,9 @@ private extension RestoreState {
   canRestore=await restoreAllowed(auth)
   if self.account==account,self.device==device,let coordinator,let library{try await coordinator.activate(account:account,library:library);try await compoundCoordinator?.activate(account:account,library:library);return}
   await invalidate();let root=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RestoreQueue").appendingPathComponent(account.uuidString).appendingPathComponent(device.uuidString),files=try RestoreFiles(directory:root.appendingPathComponent("temporary")),queue=try RestoreQueue(url:root.appendingPathComponent("restore.sqlite"));let key="restore_library_"+account.uuidString+"_"+device.uuidString,library=UserDefaults.standard.string(forKey:key).flatMap(UUID.init(uuidString:)) ?? UUID();UserDefaults.standard.set(library.uuidString,forKey:key)
-  guard let storageValue=Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String,let origin=URL(string:storageValue) else{throw RestoreFailure.authorization};let api=try HTTPRestoreAPI(base:base,tokens:store,allowLocalHTTP:_isDebugAssertConfiguration()),downloader=try FileRestoreDownloader(origin:origin,allowLocalHTTP:_isDebugAssertConfiguration()),coordinator=RestoreCoordinator(queue:queue,files:files,api:api,downloader:downloader,photos:PhotoKitRestorer());let compoundQueue=try CompoundRestoreQueue(url:root.appendingPathComponent("compound.sqlite")),compoundCoordinator=CompoundRestoreCoordinator(queue:compoundQueue,files:files,api:api,downloader:downloader,photos:CompoundPhotoKitRestorer());self.compoundQueue=compoundQueue;self.compoundCoordinator=compoundCoordinator;try await compoundCoordinator.activate(account:account,library:library);self.account=account;self.device=device;self.library=library;self.api=api;self.queue=queue;self.files=files;self.coordinator=coordinator;try await coordinator.activate(account:account,library:library);availableBytes=try? SystemDeviceCapacity().available(at:files.directory);canRestore=await restoreAllowed(auth)
+  guard let storageValue=Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String,let origin=URL(string:storageValue) else{throw RestoreFailure.authorization};let api=try HTTPRestoreAPI(base:base,tokens:store,allowLocalHTTP:_isDebugAssertConfiguration()),downloader=try FileRestoreDownloader(origin:origin,allowLocalHTTP:_isDebugAssertConfiguration()),coordinator=RestoreCoordinator(queue:queue,files:files,api:api,downloader:downloader,photos:PhotoKitRestorer());let compoundQueue=try CompoundRestoreQueue(url:root.appendingPathComponent("compound.sqlite")),compoundCoordinator=CompoundRestoreCoordinator(queue:compoundQueue,files:files,api:api,downloader:downloader,photos:CompoundPhotoKitRestorer());self.compoundQueue=compoundQueue;self.compoundCoordinator=compoundCoordinator;try await compoundCoordinator.activate(account:account,library:library);self.account=account;self.device=device;self.library=library;self.api=api;self.queue=queue;self.files=files;self.coordinator=coordinator;try await coordinator.activate(account:account,library:library);availableBytes=try? SystemDeviceCapacity().available(at:files.directory);canRestore=await restoreAllowed(auth);alertsSuspended=false;await observeTransferAlerts()
  }
- func invalidate()async{worker?.cancel();await coordinator?.deactivate();await compoundCoordinator?.deactivate();await worker?.value;worker=nil;coordinator=nil;compoundCoordinator=nil;compoundQueue=nil;compounds=[];api=nil;queue=nil;files=nil;account=nil;device=nil;library=nil;assets=[];items=[];selected=[];progress=[:];nextCursor=nil;queueCursor=nil;queueAnchor=nil;showingLaterQueuePage=false;canRestore=false}
+ func invalidate()async{alertsSuspended=true;worker?.cancel();await coordinator?.deactivate();await compoundCoordinator?.deactivate();await worker?.value;worker=nil;coordinator=nil;compoundCoordinator=nil;compoundQueue=nil;compounds=[];api=nil;queue=nil;files=nil;account=nil;device=nil;library=nil;assets=[];items=[];selected=[];progress=[:];nextCursor=nil;queueCursor=nil;queueAnchor=nil;showingLaterQueuePage=false;canRestore=false}
  func loadAssets(next:Bool=false)async{do{try await connect();guard let api else{return};let page=try await api.inventory(cursor:next ? nextCursor:nil);assets=page.items;
  #if DEBUG
  assets=assets.filter{(ownerTestAssets?.contains($0.id) ?? ($0.id==developmentTestAsset)) && ["image","video"].contains($0.mediaType)};nextCursor=page.nextCursor
@@ -71,7 +73,33 @@ private extension RestoreState {
  #endif
 selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test: restore one disposable item at a time. This creates a new Photos copy; keep originals." : "Select protected versions explicitly. Restoring creates new Photos items."):"Real restore is disabled until server and physical-device acceptance."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
  var hasNextAssets:Bool{nextCursor != nil}
- func refresh(next:Bool=false)async{do{try await connect();if let queue,let account,let library{if next{queueAnchor=queueCursor};let requestedAnchor=queueAnchor;let page=try await queue.recent(account:account,library:library,after:requestedAnchor,limit:100);guard queueAnchor==requestedAnchor else{return};items=page;showingLaterQueuePage=queueAnchor != nil;queueCursor=items.last?.id;if let compoundQueue{compounds=try await compoundQueue.page(account:account,library:library,limit:100)}};progress=await coordinator?.progressSnapshot() ?? [:]}catch{message="Restore is paused. Your queue is retained."}}
+ func refresh(next:Bool=false)async{do{try await connect();if let queue,let account,let library{if next{queueAnchor=queueCursor};let requestedAnchor=queueAnchor;let page=try await queue.recent(account:account,library:library,after:requestedAnchor,limit:100);guard queueAnchor==requestedAnchor else{return};items=page;showingLaterQueuePage=queueAnchor != nil;queueCursor=items.last?.id;if let compoundQueue{compounds=try await compoundQueue.page(account:account,library:library,limit:100)}};progress=await coordinator?.progressSnapshot() ?? [:];await observeTransferAlerts()}catch{message="Restore is paused. Your queue is retained."}}
+ private func observeTransferAlerts() async {
+  guard !alertsSuspended,!scanningAlerts,let queue,let compoundQueue,let account,let library else{return}
+  scanningAlerts=true;defer{scanningAlerts=false}
+  let scope="restore."+account.uuidString+"."+library.uuidString
+  TransferNotifications.shared.activate(scope)
+  var snapshot:[String:String]=[:],cursor:UUID?
+  func outcome(_ state:RestoreState)->String {
+   TransferNotificationPolicy.restoreOutcome(state:state.rawValue)
+  }
+  do {
+   while true {
+    let page=try await queue.page(account:account,library:library,after:cursor,limit:100)
+    guard self.account==account,self.library==library else{return}
+    for item in page {snapshot[item.id.uuidString]=outcome(item.state)}
+    if page.count<100{break};cursor=page.last?.id
+   }
+   cursor=nil
+   while true {
+    let page=try await compoundQueue.page(account:account,library:library,after:cursor,limit:100)
+    guard self.account==account,self.library==library else{return}
+    for item in page {snapshot[item.id.uuidString]=outcome(item.state)}
+    if page.count<100{break};cursor=page.last?.id
+   }
+   await TransferNotifications.shared.observe(scope:scope,snapshot:snapshot)
+  } catch { /* Notification failures cannot change restore or Photos state. */ }
+ }
  func firstQueuePage()async{queueAnchor=nil;await refresh()}
  func enqueue(again:Bool=false)async{busy=true;defer{busy=false};do{try await connect();guard canRestore,let api,let queue,let account,let library else{throw RestoreFailure.disabled};if let availableBytes,selectedBytes*2>availableBytes-64*1024*1024{message="Insufficient estimated device space. Select a smaller batch; unrelated content is never removed.";return};let planner=RestorePlanner(queue:queue,photos:PhotoKitRestorer());
  #if DEBUG
@@ -81,7 +109,7 @@ selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test
  for id in selected{if let manifest=try await api.manifestForAsset(id),![MediaKind.ordinary,.legacy].contains(manifest.kind){guard let compoundQueue else{throw RestoreFailure.disabled};let plan=try await api.compoundPlan(manifest.id,fingerprint:manifest.manifestFingerprint,choice:.all);try await compoundQueue.insert(CompoundRestoreRecord(account:account,library:library,plan:plan),restoreAgain:again)}else{let evidence=try await api.evidence(id);_=try await planner.enqueue(account:account,library:library,evidence:evidence,restoreAgain:again)}}
  #endif
  selected=[];await refresh()}catch RestoreFailure.duplicate{message="This version may already exist in Photos. Restore another copy only by explicit choice."}catch RestoreFailure.ambiguousSave{message="A previous save needs reconciliation. Restoring another copy may create a duplicate."}catch{message="Restore selection could not proceed. Cloud protection is unchanged."}}
- func tick()async{do{try await connect();if canRestore,worker==nil,let coordinator{worker=Task{await coordinator.runDue();if let compoundCoordinator=self.compoundCoordinator{await compoundCoordinator.runDue()};self.worker=nil}};await refresh()}catch{await coordinator?.deactivate();message="Authorization unavailable; no new Photos saves."}}
+ func tick()async{do{try await connect();if canRestore,worker==nil,let coordinator{worker=Task{await coordinator.runDue();if let compoundCoordinator=self.compoundCoordinator{await compoundCoordinator.runDue()};await self.observeTransferAlerts();self.worker=nil}};await refresh()}catch{await coordinator?.deactivate();message="Authorization unavailable; no new Photos saves."}}
  func control(_ item:RestoreItem,_ action:String)async{do{try await connect();if action=="pause"{try await coordinator?.pause(item.id)}else if action=="cancel"{try await coordinator?.cancel(item.id)}else{try await coordinator?.resume(item.id)};await refresh()}catch{message="Save outcome requires review; an uncertain Photos save is never retried automatically."}}
  func compoundControl(_ r:CompoundRestoreRecord,_ action:String)async{do{try await connect();if action=="pause"{try await compoundCoordinator?.pause(r.id)}else if action=="cancel"{try await compoundCoordinator?.cancel(r.id)}else{try await compoundCoordinator?.resume(r.id)};await refresh()}catch{message="An uncertain Photos save requires reconciliation before retry."}}
  func restoreVariant(_ asset:UUID,choice:ManifestRestoreChoice)async{do{try await connect();guard canRestore,let api,let compoundQueue,let account,let library,let manifest=try await api.manifestForAsset(asset) else{throw RestoreFailure.disabled};let plan=try await api.compoundPlan(manifest.id,fingerprint:manifest.manifestFingerprint,choice:choice);try await compoundQueue.insert(CompoundRestoreRecord(account:account,library:library,plan:plan));await refresh()}catch{message="This restore variant is unsupported or awaits fidelity acceptance."}}
