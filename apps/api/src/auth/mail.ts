@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
+import type {PoolClient} from 'pg';
 import * as nodemailer from 'nodemailer';
 
 export interface AccountMail { to: string; kind: 'verify' | 'reset' | 'security' | 'billing' | 'deletion' | 'invite'; token: string; lifecycleEvent?: 'REQUESTED' | 'CANCELLED' | 'PARTIAL' | 'COMPLETED' }
-export abstract class AccountMailer { abstract send(message: AccountMail): Promise<void>; }
+export abstract class AccountMailer { abstract send(message: AccountMail): Promise<void>; enqueueInTransaction?(message:AccountMail,client:PoolClient,userId:string):Promise<void>; }
 
 @Injectable()
 export class LocalAccountMailer extends AccountMailer {

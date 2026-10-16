@@ -33,7 +33,7 @@ export class AuthService {
   }
   private async deliver(to: string, kind: 'verify' | 'reset', raw: string) {
     // Do not turn mail failures into an account-existence oracle. Resend is available.
-    // A durable mail outbox/provider is deferred; never print the link or exception.
+    // Development transport only; production token mail is queued transactionally.
     try { await this.mail.send({ to, kind, token: raw }); } catch { /* deliberately no sensitive logging */ }
   }
   async register(display: string, normalized: string, password: string) {
@@ -152,16 +152,25 @@ export class AuthService {
     const raw = issue();
     let recipient: string | null = null;
     if (found.rows[0]) {
-      recipient = await this.db.transaction(async client => {
+      try { recipient = await this.db.transaction(async client => {
         const result = await client.query('SELECT * FROM users WHERE id=$1 FOR UPDATE', [found.rows[0]!.id]);
         const user = result.rows[0];
-        if (user.status !== 'ACTIVE' || (kind === 'verify' && user.email_verified_at !== null)) return null;
+        if (!user || user.status !== 'ACTIVE' || (kind === 'verify' && user.email_verified_at !== null)) return null;
         const table = kind === 'verify' ? 'email_verification_tokens' : 'password_reset_tokens';
         // Constant table identifiers only, never derived from a request.
         await client.query(`UPDATE ${table} SET used_at=now() WHERE user_id=$1 AND used_at IS NULL`, [user.id]);
         await client.query(`INSERT INTO ${table} (id,user_id,token_hash,expires_at) VALUES ($1,$2,$3,now()+interval '${kind === 'verify' ? '24 hours' : '30 minutes'}')`, [randomUUID(), user.id, digest(raw)]);
+        if(this.mail.enqueueInTransaction){
+          // Issuance, old-token invalidation and encrypted delivery job commit together.
+          await this.mail.enqueueInTransaction({to:user.email,kind,token:raw},client,user.id);
+          return null;
+        }
+        if(process.env.NODE_ENV==='production')throw new Error('Transactional account email required');
         return user.email as string;
-      });
+      }); } catch {
+        // Rollback preserves prior links; public responses must not reveal account existence.
+        await this.db.query("INSERT INTO operational_security_events(id,code) VALUES($1,'ACCOUNT_EMAIL_QUEUE_FAILED')",[randomUUID()]).catch(()=>{});
+      }
     }
     if (recipient) await this.deliver(recipient, kind, raw);
     return GENERIC_ACCOUNT_MESSAGE;
