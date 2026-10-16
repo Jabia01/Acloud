@@ -71,7 +71,7 @@ private extension RestoreState {
  #else
  nextCursor=page.nextCursor
  #endif
-selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test: restore one disposable item at a time. This creates a new Photos copy; keep originals." : "Select protected versions explicitly. Restoring creates new Photos items."):"Real restore is disabled until server and physical-device acceptance."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
+selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test: select up to 10 eligible photos or videos. This creates a new Photos copy; keep originals." : "Select protected versions explicitly. Restoring creates new Photos items."):"Restore access is not currently enabled for this session. Existing cloud backups stay protected."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
  var hasNextAssets:Bool{nextCursor != nil}
  func refresh(next:Bool=false)async{do{try await connect();if let queue,let account,let library{if next{queueAnchor=queueCursor};let requestedAnchor=queueAnchor;let page=try await queue.recent(account:account,library:library,after:requestedAnchor,limit:100);guard queueAnchor==requestedAnchor else{return};items=page;showingLaterQueuePage=queueAnchor != nil;queueCursor=items.last?.id;if let compoundQueue{compounds=try await compoundQueue.page(account:account,library:library,limit:100)}};progress=await coordinator?.progressSnapshot() ?? [:];await observeTransferAlerts()}catch{message="Restore is paused. Your queue is retained."}}
  private func observeTransferAlerts() async {
@@ -101,14 +101,55 @@ selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test
   } catch { /* Notification failures cannot change restore or Photos state. */ }
  }
  func firstQueuePage()async{queueAnchor=nil;await refresh()}
- func enqueue(again:Bool=false)async{busy=true;defer{busy=false};do{try await connect();guard canRestore,let api,let queue,let account,let library else{throw RestoreFailure.disabled};if let availableBytes,selectedBytes*2>availableBytes-64*1024*1024{message="Insufficient estimated device space. Select a smaller batch; unrelated content is never removed.";return};let planner=RestorePlanner(queue:queue,photos:PhotoKitRestorer());
- #if DEBUG
- guard selected.count==1,let selectedID=selected.first,(ownerTestAssets?.contains(selectedID) ?? (selectedID==developmentTestAsset)) else{throw RestoreFailure.disabled}
- let evidence=try await api.evidence(selected.first!);_=try await planner.enqueue(account:account,library:library,evidence:evidence,restoreAgain:again)
- #else
- for id in selected{if let manifest=try await api.manifestForAsset(id),![MediaKind.ordinary,.legacy].contains(manifest.kind){guard let compoundQueue else{throw RestoreFailure.disabled};let plan=try await api.compoundPlan(manifest.id,fingerprint:manifest.manifestFingerprint,choice:.all);try await compoundQueue.insert(CompoundRestoreRecord(account:account,library:library,plan:plan),restoreAgain:again)}else{let evidence=try await api.evidence(id);_=try await planner.enqueue(account:account,library:library,evidence:evidence,restoreAgain:again)}}
- #endif
- selected=[];await refresh()}catch RestoreFailure.duplicate{message="This version may already exist in Photos. Restore another copy only by explicit choice."}catch RestoreFailure.ambiguousSave{message="A previous save needs reconciliation. Restoring another copy may create a duplicate."}catch{message="Restore selection could not proceed. Cloud protection is unchanged."}}
+ func selectVisible(_ visible:[ProtectedRestoreAsset]) {
+  guard !busy,canRestore else{return}
+  selected=Set(visible.prefix(RestoreSelectionPolicy.maximum).map(\.id))
+ }
+ func select(_ id:UUID,on:Bool) {
+  guard !busy,canRestore else{return}
+  if !on{selected.remove(id);return}
+  guard assets.contains(where:{$0.id==id}),selected.count<RestoreSelectionPolicy.maximum else{message="Select up to 10 items per restore batch.";return}
+  selected.insert(id)
+ }
+ func enqueue(again:Bool=false)async {
+  guard !busy else{return};busy=true;defer{busy=false}
+  do {
+   try await connect()
+   guard canRestore,let api,let queue,let account,let library,
+         RestoreSelectionPolicy.accepts(selected,allowed:Set(assets.map(\.id))) else{throw RestoreFailure.disabled}
+   #if DEBUG
+   let allowed=ownerTestAssets ?? Set(developmentTestAsset.map{[$0]} ?? [])
+   guard RestoreSelectionPolicy.accepts(selected,allowed:allowed) else{throw RestoreFailure.disabled}
+   #endif
+   if let availableBytes,selectedBytes*2>availableBytes-64*1024*1024{message="Insufficient estimated device space. Select a smaller batch; unrelated content is never removed.";return}
+   let planner=RestorePlanner(queue:queue,photos:PhotoKitRestorer())
+   var queued=0,existing=0,failed=0
+   for id in selected.sorted(by:{$0.uuidString<$1.uuidString}) {
+    do {
+     #if DEBUG
+     let evidence=try await api.evidence(id)
+     _=try await planner.enqueue(account:account,library:library,evidence:evidence,restoreAgain:again)
+     #else
+     if let manifest=try await api.manifestForAsset(id),![MediaKind.ordinary,.legacy].contains(manifest.kind){
+      guard let compoundQueue else{throw RestoreFailure.disabled}
+      let plan=try await api.compoundPlan(manifest.id,fingerprint:manifest.manifestFingerprint,choice:.all)
+      try await compoundQueue.insert(CompoundRestoreRecord(account:account,library:library,plan:plan),restoreAgain:again)
+     }else{
+      let evidence=try await api.evidence(id)
+      _=try await planner.enqueue(account:account,library:library,evidence:evidence,restoreAgain:again)
+     }
+     #endif
+     queued+=1;selected.remove(id)
+    }catch RestoreFailure.duplicate{existing+=1;selected.remove(id)}
+    catch{failed+=1}
+   }
+   message="\(queued) queued for restore."
+   if existing>0{message+=" \(existing) already queued or saved; use Restore another copy only if intended."}
+   if failed>0{message+=" \(failed) could not be queued and remain selected for review. Cloud backups are unchanged."}
+   await refresh()
+  }catch{message="Restore selection could not proceed. Check restore access and select up to 10 eligible items. Cloud backups are unchanged."}
+ }
+
  func tick()async{do{try await connect();if canRestore,worker==nil,let coordinator{worker=Task{await coordinator.runDue();if let compoundCoordinator=self.compoundCoordinator{await compoundCoordinator.runDue()};await self.observeTransferAlerts();self.worker=nil}};await refresh()}catch{await coordinator?.deactivate();message="Authorization unavailable; no new Photos saves."}}
  func control(_ item:RestoreItem,_ action:String)async{do{try await connect();if action=="pause"{try await coordinator?.pause(item.id)}else if action=="cancel"{try await coordinator?.cancel(item.id)}else{try await coordinator?.resume(item.id)};await refresh()}catch{message="Save outcome requires review; an uncertain Photos save is never retried automatically."}}
  func compoundControl(_ r:CompoundRestoreRecord,_ action:String)async{do{try await connect();if action=="pause"{try await compoundCoordinator?.pause(r.id)}else if action=="cancel"{try await compoundCoordinator?.cancel(r.id)}else{try await compoundCoordinator?.resume(r.id)};await refresh()}catch{message="An uncertain Photos save requires reconciliation before retry."}}
@@ -153,20 +194,27 @@ struct RestoreView:View {
     }
     Section("Choose items to restore") {
      Picker("Media type",selection:$mediaFilter){ForEach(AcloudMediaFilter.allCases){filter in Text(filter.rawValue).tag(filter)}}.pickerStyle(.segmented)
+     HStack {
+      Button("Select up to 10 visible items"){model.selectVisible(model.assets.filter{mediaFilter.includes($0.mediaType)})}.disabled(model.busy || !model.canRestore || model.assets.isEmpty)
+      Spacer()
+      Button("Clear selection"){model.selected=[]}.disabled(model.busy || model.selected.isEmpty)
+     }
+     Text("Select several photos or videos, then tap Restore selected to Photos. Up to 10 items per batch.").font(.footnote)
      Text("Grouped by backup date, newest first. A preview appears when the original is available locally.").font(.caption).foregroundStyle(.secondary)
-     if model.assets.isEmpty{Text("No verified backups are available in this page.").foregroundStyle(.secondary)}
+     if !model.canRestore{Text("Restore access is currently unavailable for this session. This does not mean your protected backups are missing.").foregroundStyle(.secondary)}
+     else if model.assets.isEmpty{Text("No verified backups are available in this page.").foregroundStyle(.secondary)}
      else if model.assets.filter({mediaFilter.includes($0.mediaType)}).isEmpty{Text("No \(mediaFilter.rawValue.lowercased()) in this page.").foregroundStyle(.secondary)}
     }
     ForEach(acloudMediaGroups(model.assets.filter{mediaFilter.includes($0.mediaType)},type:{$0.mediaType},date:{$0.backupDate})) {group in
      Section {ForEach(group.items){asset in
-      Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{if $0{model.selected.insert(asset.id)}else{model.selected.remove(asset.id)}})) {
+      Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{model.select(asset.id,on:$0)})) {
        AcloudMediaHeader(type:asset.mediaType,reference:asset.id,localID:model.localPreviewID(for:asset.id),dateLabel:"Backed up",date:asset.backupDate,detail:asset.sizeBytes.map{"Verified size · \($0.formatted(.byteCount(style:.file)))"} ?? "Verified backup · size unavailable")
-      }.padding(.vertical,8)
+      }.padding(.vertical,8).disabled(model.busy || !model.canRestore)
      }} header:{AcloudMediaGroupTitle(title:group.title+" · verified backups",date:group.day)}
     }
     Section {
-     Button("Refresh protected library"){Task{await model.loadAssets()}}
-     if model.hasNextAssets{Button("Next protected page"){Task{await model.loadAssets(next:true)}}}
+     Button("Refresh protected library"){Task{await model.loadAssets()}}.disabled(model.busy)
+     if model.hasNextAssets{Button("Next protected page"){Task{await model.loadAssets(next:true)}}.disabled(model.busy)}
      DisclosureGroup("Advanced restore: Live Photos and edits") {
       Text("Live Photos require both resources. Edited assets require an explicit original or rendered choice; adjustment recipes cannot be reapplied exactly.").font(.footnote)
       ForEach(model.assets.filter{mediaFilter.includes($0.mediaType)}){asset in
