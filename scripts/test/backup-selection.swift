@@ -22,6 +22,11 @@ import Foundation
   var called=false
   let invalid=await BackupSelectionPolicy.process((0..<11).map{String($0)}){_ in called=true;return .added}
   precondition(invalid==nil && !called)
+  let rejected=await BackupSelectionPolicy.process(["one","two"]){_ in .rejected(403)}
+  precondition(rejected?.failed==2 && rejected?.statusCodes==[403])
+  precondition(rejected!.message.contains("HTTP 403") && !rejected!.message.contains("Check your connection"))
+  let invalidCode=await BackupSelectionPolicy.process(["one"]){_ in .rejected(9999)}
+  precondition(invalidCode?.failed==1 && invalidCode!.statusCodes.isEmpty)
   print("PASS: 10-item bound, stable deduplication, missing access, mixed outcomes and continuation after individual failure")
  }
 }

@@ -31,6 +31,16 @@ final class ManifestTests:XCTestCase{
  func testFingerprintDeterministic(){XCTAssertEqual(source().fingerprint,source().fingerprint)}
  func testVersionOneAccepted(){XCTAssertEqual(manifest().manifestVersion,1)}
  func testFutureVersionCannotClaimComplete(){let m=MediaManifest(binding:manifest().binding,source:source(),manifestVersion:2);XCTAssertFalse(captured(m).completeLocal);XCTAssertThrowsError(try m.wireMetadata())}
+ func testWireUUIDsMatchServerCanonicalIdentifiers()throws {
+  let identifier=UUID(uuidString:"ABCDEF12-3456-4ABC-8DEF-0123456789AB")!
+  let m=MediaManifest(id:identifier,binding:ManifestBinding(accountID:UUID(),deviceID:identifier,libraryID:identifier),sourceToken:identifier,source:source([1,9],live:true))
+  let metadata=try m.wireMetadata()
+  for key in ["id","deviceId","libraryId","sourceToken"]{XCTAssertEqual(metadata[key] as? String,identifier.uuidString.lowercased(),key)}
+  for resource in metadata["resources"] as! [[String:Any]] {
+   let value=try XCTUnwrap(resource["id"] as? String)
+   XCTAssertEqual(value,value.lowercased());XCTAssertNotNil(UUID(uuidString:value))
+  }
+ }
  func testWireOmitsLocalIdentifierAndFilename()throws{let m=manifest();let s=String(decoding:try JSONSerialization.data(withJSONObject:m.wireMetadata()),as:UTF8.self);XCTAssertFalse(s.contains("fixture"));XCTAssertFalse(s.contains("localID"));XCTAssertFalse(s.contains("filename"))}
  func testRawJPEGWireNormalizesJPEGRole()throws{let m=manifest([1,4],utis:["public.jpeg","com.adobe.raw-image"]);let json=try m.wireMetadata();let r=json["resources"] as! [[String:Any]];XCTAssertEqual(r[0]["role"] as? String,"JPEG_COMPANION")}
  func testSameBytesDifferentRolesNotDeduplicated(){let m=captured(manifest([1,9],live:true));XCTAssertNotEqual(m.resources[0].id,m.resources[1].id);XCTAssertEqual(m.resources[0].expectedSha256,m.resources[1].expectedSha256)}

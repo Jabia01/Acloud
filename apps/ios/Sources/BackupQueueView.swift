@@ -285,7 +285,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
      return hasNewResource ? .added:.existing
      #endif
     }catch let failure as BackupFailure {
-     switch failure {case .inaccessible:return .inaccessible;case .unsupported:return .unsupported;default:return .failed}
+     switch failure {case .inaccessible:return .inaccessible;case .unsupported:return .unsupported;case .http(let code):return .rejected(code);case .authorization:return .rejected(403);default:return .failed}
     }catch let failure as ManifestFailure {
      switch failure {case .unsupported,.fidelityPending:return .unsupported;default:return .failed}
     }catch{return .failed}

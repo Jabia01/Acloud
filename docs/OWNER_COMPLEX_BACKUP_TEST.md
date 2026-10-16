@@ -21,3 +21,7 @@ Complex Photos restore remains separately gated. This test does not enable Live 
 ## Evidence
 
 2026-10-16: six selection-policy tests plus six existing multi-resource preparation/account/isolation/change/iCloud tests passed (12 total). Signed Debug and unsigned Release builds passed. Built Debug plist confirms test switch true and cleanup false; Release background-transfer flag remains false. Physical successful resource capture/cloud completeness remains awaiting owner testing. No live customer media selected or uploaded by the agent, and no beta acceptance rows forged.
+
+## Identifier interoperability fix (2026-10-16)
+
+The first physical selection attempt exposed a native/server identifier-format mismatch. Swift UUID strings were uppercase; the server compares source device and idempotency metadata against canonical lowercase UUIDs. A generated request reproduced HTTP403 Source device mismatch; identical canonical metadata passed. Wire metadata now uses canonical lowercase manifest/device/library/source-token/resource IDs. No authorization guard was loosened. A new native regression failed before the change and passed afterward; all 48 ManifestTests passed. Batch errors now report bounded HTTP status codes with relevant guidance instead of labeling server rejections as connection problems. No Photos identifiers, server body or credentials are shown. Physical successful Live Photo backup still requires user confirmation.
