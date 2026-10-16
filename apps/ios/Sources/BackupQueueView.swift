@@ -347,17 +347,30 @@ struct BackupQueueView:View {
  @ObservedObject private var model=BackupQueueModel.shared
  private enum PickerSelection:String,Identifiable {case photo,video,originals;var id:String{rawValue}}
  @State private var pickerSelection:PickerSelection?
+ private enum QueueFilter:String,CaseIterable {case all="All transfers",active="In progress",attention="Needs attention",verified="Verified"}
+ @State private var queueFilter:QueueFilter = .all
  @State private var transferFilter:AcloudMediaFilter = .all
+ private var visibleTransfers:[BackupItem] {model.items.filter {item in
+  guard transferFilter.includes(item.mediaType) else{return false}
+  switch queueFilter {
+  case .all:return true
+  case .active:return ![.protected,.cancelled,.paused,.failedRetryable,.failedPermanent].contains(item.state)
+  case .attention:return [.paused,.failedRetryable,.failedPermanent].contains(item.state)
+  case .verified:return item.state == .protected
+  }
+ }}
  private var protectedCount:Int {model.summary[.protected] ?? 0}
- private var waitingCount:Int {model.summary.filter{![BackupState.protected,.cancelled].contains($0.key)}.values.reduce(0,+)}
+ private var waitingCount:Int {model.summary.filter{![BackupState.protected,.cancelled,.paused,.failedRetryable,.failedPermanent].contains($0.key)}.values.reduce(0,+)}
+ private var attentionCount:Int {[BackupState.paused,.failedRetryable,.failedPermanent].reduce(0){$0+(model.summary[$1] ?? 0)}}
  var body:some View {
   NavigationStack {
    List {
     Section {
      AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Make room for memories.",message:"Choose what to back up. We check each stored file before marking it protected. Keep your originals during beta.").acloudFeatureRow()
      LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
-      AcloudMetric(title:"Verified in this queue",value:protectedCount.formatted(),icon:"checkmark.shield")
-      AcloudMetric(title:"Waiting or in progress",value:waitingCount.formatted(),icon:"arrow.triangle.2.circlepath")
+      AcloudMetric(title:"Verified files",value:protectedCount.formatted(),icon:"checkmark.shield")
+      AcloudMetric(title:"Queued or in progress",value:waitingCount.formatted(),icon:"arrow.triangle.2.circlepath")
+      AcloudMetric(title:"Paused or needs attention",value:attentionCount.formatted(),icon:"exclamationmark.circle")
      }.acloudFeatureRow()
     }
     Section("Add a backup") {
@@ -384,15 +397,17 @@ struct BackupQueueView:View {
      Picker("Media type",selection:$transferFilter) {
       ForEach(AcloudMediaFilter.allCases){filter in Text(filter.rawValue).tag(filter)}
      }.pickerStyle(.segmented)
-     Text("Newest first within each group · \(model.items.filter{transferFilter.includes($0.mediaType)}.count) shown")
+     Picker("Transfer status",selection:$queueFilter) {ForEach(QueueFilter.allCases,id:\.self){filter in Text(filter.rawValue).tag(filter)}}
+     Text("Live Photos and edits can include several files. A file is protected only after verification.").font(.caption).foregroundStyle(.secondary)
+     Text("Newest first within each group · \(visibleTransfers.count) shown")
       .font(.caption).foregroundStyle(.secondary)
      if model.items.isEmpty {
       ContentUnavailableView("Your first backup starts here",systemImage:"icloud.and.arrow.up",description:Text("Choose a photo or video above to see its progress here."))
-     } else if model.items.filter({transferFilter.includes($0.mediaType)}).isEmpty {
-      Text("No \(transferFilter.rawValue.lowercased()) in this part of the queue.").foregroundStyle(.secondary)
+     } else if visibleTransfers.isEmpty {
+      Text("No transfers match these filters on this page.").foregroundStyle(.secondary)
      }
     }
-    ForEach(acloudMediaGroups(model.items.filter{transferFilter.includes($0.mediaType)},type:{$0.mediaType},date:{$0.createdAt})) {group in
+    ForEach(acloudMediaGroups(visibleTransfers,type:{$0.mediaType},date:{$0.createdAt})) {group in
      Section {ForEach(group.items){item in transferRow(item)}} header:{AcloudMediaGroupTitle(title:group.title+" · transfers",date:group.day)}
     }
     if model.hasOlderTransfers || model.showingOlderTransfers {Section {
@@ -404,7 +419,8 @@ struct BackupQueueView:View {
       ForEach(model.manifests){manifest in
        VStack(alignment:.leading,spacing:10) {
         AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,previewSource:.backupVersion,sourceCaptureDate:manifest.source.creation,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
-        Label(manifest.state == .fullyProtected ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files",systemImage:manifest.state == .fullyProtected ? "checkmark.shield.fill":"square.stack.3d.up")
+        Label([.fullyProtected,.restoreReady].contains(manifest.state) ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files",systemImage:[.fullyProtected,.restoreReady].contains(manifest.state) ? "checkmark.shield.fill":"square.stack.3d.up")
+        ProgressView(value:Double(manifest.required.filter{$0.status=="PROTECTED"}.count),total:Double(max(1,manifest.required.count))).accessibilityLabel("Required files verified")
         Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required files protected").font(.caption)
         DisclosureGroup("Details") {Text("All required files must verify together. Live Photo/edited-photo restore is a separate pending test; removing device copies remains disabled.").font(.footnote).foregroundStyle(.secondary)}
        }.padding(.vertical,8)
@@ -422,7 +438,7 @@ struct BackupQueueView:View {
     }
     #endif
    }.acloudCanvas().navigationTitle("Backup")
-  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(filter:selection == .video ? .videos:selection == .photo ? .images:.any(of:[.images,.videos])){result in pickerSelection=nil;guard let result else{return};transferFilter = .all;Task{await model.enqueueSelected(result.identifiers,unavailableCount:result.unavailableCount)}}.id(selection.id)}
+  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(filter:selection == .video ? .videos:selection == .photo ? .images:.any(of:[.images,.videos])){result in pickerSelection=nil;guard let result else{return};transferFilter = .all;queueFilter = .all;Task{await model.enqueueSelected(result.identifiers,unavailableCount:result.unavailableCount)}}.id(selection.id)}
    .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
    .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
  }
@@ -431,13 +447,10 @@ struct BackupQueueView:View {
    AcloudMediaHeader(type:item.mediaType,reference:item.id,localID:item.state == .protected ? nil:(item.mediaResourceBinding?.sourceLocalID ?? item.originalManifest?.source.localID ?? (item.mediaType == "test" ? nil:item.localAssetIdentifier)),previewSource:item.state == .protected ? .backupVersion:.device,sourceCaptureDate:item.originalManifest?.source.creation,dateLabel:"Backup added",date:item.createdAt,detail:item.mediaType == "test" ? "Generated or supporting file":nil)
    Label(item.state.displayTitle,systemImage:item.state == .protected ? "checkmark.shield.fill":item.state == .failedPermanent || item.state == .failedRetryable ? "exclamationmark.circle":"arrow.up.circle")
     .font(.subheadline.weight(.semibold)).foregroundStyle(item.state == .protected ? AcloudStyle.accent:Color.primary)
-   if item.state == .protected {
-    if let size=item.expectedSizeBytes {Text("Verified size · \(Int64(size).formatted(.byteCount(style:.file)))").font(.caption).foregroundStyle(.secondary)}
-   } else if item.state != .cancelled {
-    if let total=item.expectedSizeBytes,total>0 {
-     ProgressView(value:Double(min(item.bytesUploaded,total)),total:Double(total)).accessibilityLabel("Bytes transferred")
-     Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) of \(Int64(total).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)
-    } else {Text("\(Int64(item.bytesUploaded).formatted(.byteCount(style:.file))) transferred").font(.caption).foregroundStyle(.secondary)}
+   if item.state != .cancelled {
+    AcloudTransferProgress(stages:["Upload","Verify","Protected"],stage:item.state == .protected ? 2:[.uploaded,.verifying].contains(item.state) ? 1:0,bytes:item.bytesUploaded,total:item.expectedSizeBytes ?? 0,activity:item.state.displayTitle,transferring:item.state == .uploading,complete:item.state == .protected,stopped:[.paused,.failedPermanent,.failedRetryable].contains(item.state))
+    if item.state == .protected,let size=item.expectedSizeBytes {Text("Verified size · \(Int64(size).formatted(.byteCount(style:.file)))").font(.caption).foregroundStyle(.secondary)}
+    if [.uploaded,.verifying].contains(item.state) {Text("Upload finished. Waiting for integrity checks before protection is confirmed.").font(.caption).foregroundStyle(.secondary)}
    }
    if [.paused,.failedPermanent,.failedRetryable].contains(item.state),let guidance=backupGuidance(item) {Text(guidance).font(.subheadline).foregroundStyle(.secondary)}
    if ![BackupState.protected,.cancelled].contains(item.state) {

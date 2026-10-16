@@ -170,7 +170,7 @@ struct AcloudMediaHeader:View {
                     .font(.headline).foregroundStyle(.primary)
                 if let taken=sourceCaptureDate ?? (previewSource == .device ? capturedAt:nil) {Text("Taken \(taken.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.subheadline).foregroundStyle(.secondary)}
                 if previewSource == .backupVersion {
-                    Text("Backup preview unavailable").font(.caption).foregroundStyle(.secondary)
+                    Text("Saved version · no preview yet").font(.caption).foregroundStyle(.secondary)
                 } else if localID != nil {
                     Text("Current device preview").font(.caption).foregroundStyle(.secondary)
                 }
@@ -216,5 +216,46 @@ private struct AcloudLocalThumbnail:UIViewRepresentable {
     }
     static func dismantleUIView(_ view:UIImageView,coordinator:Coordinator) {
         coordinator.token=UUID();coordinator.manager.cancelImageRequest(coordinator.request);view.image=nil
+    }
+}
+
+// Transfer stages describe observed state only; a full byte bar never grants protection.
+struct AcloudTransferProgress:View {
+    let stages:[String]
+    let stage:Int
+    let bytes:Int
+    let total:Int
+    var activity="Waiting to start"
+    var transferring=false
+    var complete=false
+    var stopped=false
+    var body:some View {
+        VStack(alignment:.leading,spacing:10) {
+            HStack(alignment:.top,spacing:8) {
+                ForEach(Array(stages.enumerated()),id:\.offset) { index,title in
+                    VStack(spacing:5) {
+                        Image(systemName:complete || index < stage ? "checkmark.circle.fill":index == stage ? "circle.inset.filled":"circle")
+                            .foregroundStyle(complete || index <= stage ? AcloudStyle.accent:Color.secondary)
+                        Text(title).font(.caption.weight(index == stage ? .semibold:.regular)).multilineTextAlignment(.center)
+                    }.frame(maxWidth:.infinity)
+                }
+            }.accessibilityElement(children:.ignore)
+             .accessibilityLabel(complete ? "Completed":stopped ? "Transfer stopped; completion unconfirmed":"Current stage: \(stages[min(max(stage,0),stages.count-1)])")
+            if !complete {
+                if transferring || stopped {
+                    if total > 0 {
+                        let fraction=min(1,max(0,Double(bytes)/Double(total)))
+                        HStack {
+                            Text("\(Int64(max(0,bytes)).formatted(.byteCount(style:.file))) of \(Int64(total).formatted(.byteCount(style:.file)))")
+                            Spacer()
+                            Text("\(Int(fraction*100))% transferred").monospacedDigit()
+                        }.font(.caption).foregroundStyle(.secondary)
+                        ProgressView(value:fraction).accessibilityLabel("Bytes transferred").accessibilityValue("\(Int(fraction*100)) percent; completion unconfirmed")
+                    } else {Text("Waiting for file size").font(.caption).foregroundStyle(.secondary)}
+                } else {
+                    HStack(spacing:10) {ProgressView();Text(activity).font(.caption).foregroundStyle(.secondary)}
+                }
+            }
+        }.padding(12).background(AcloudStyle.accent.opacity(0.06),in:RoundedRectangle(cornerRadius:14))
     }
 }

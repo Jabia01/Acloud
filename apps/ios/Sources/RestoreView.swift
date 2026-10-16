@@ -186,9 +186,12 @@ struct RestoreView:View {
      Text("Restore creates a new Photos copy. Cloud protection and quota stay unchanged.").font(.footnote)
      Text(model.message).font(.subheadline)
      if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))").font(.caption)}
-     Text("Selected \(model.selectedPhotos) photos, \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))").font(.subheadline)
+     VStack(alignment:.leading,spacing:8) {
+      Label(model.selected.isEmpty ? "Choose items below":"\(model.selected.count) of 10 selected",systemImage:"checkmark.circle").font(.headline)
+      Text(model.selected.isEmpty ? "Select photos or videos to see the restore size here.":"\(model.selectedPhotos) photos · \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))").font(.subheadline).foregroundStyle(.secondary)
+     }.padding(14).frame(maxWidth:.infinity,alignment:.leading).background(AcloudStyle.accent.opacity(0.06),in:RoundedRectangle(cornerRadius:14))
      Button("Allow Photos additions"){Task{await model.requestPermission()}}.disabled(!model.canRestore)
-     Button{Task{await model.enqueue()}}label:{Label("Restore selected to Photos",systemImage:"arrow.down.circle.fill").frame(maxWidth:.infinity)}
+     Button{Task{await model.enqueue()}}label:{Label(model.selected.isEmpty ? "Select items to restore":"Restore \(model.selected.count) to Photos",systemImage:"arrow.down.circle.fill").frame(maxWidth:.infinity)}
       .buttonStyle(.borderedProminent).controlSize(.large).disabled(model.selected.isEmpty || model.busy || !model.canRestore)
      Button("Restore another copy…"){confirmAnother=true}.disabled(model.selected.isEmpty || !model.canRestore)
     }
@@ -247,14 +250,13 @@ struct RestoreView:View {
    AcloudMediaHeader(type:item.evidence.mediaType,reference:item.evidence.id,previewSource:.backupVersion,dateLabel:"Restore requested",date:item.createdAt,detail:"Size · \(item.evidence.expectedSize.formatted(.byteCount(style:.file)))")
    Label(item.state.displayTitle,systemImage:item.state == .restored ? "checkmark.circle.fill":"arrow.down.circle")
     .font(.subheadline.weight(.semibold)).foregroundStyle(item.state == .restored ? AcloudStyle.accent:Color.primary)
-   if item.state == .restored,let restoredAt=item.restoredAt{Text("Saved \(restoredAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.caption).foregroundStyle(.secondary)}
-   else if item.state != .cancelled {
-    ProgressView(value:Double(min(model.progress[item.id] ?? item.bytesDownloaded,item.evidence.expectedSize)),total:Double(max(1,item.evidence.expectedSize))).accessibilityLabel("Download progress")
-    Text("\((model.progress[item.id] ?? item.bytesDownloaded).formatted(.byteCount(style:.file))) of \(item.evidence.expectedSize.formatted(.byteCount(style:.file))) downloaded").font(.caption).foregroundStyle(.secondary)
+   if item.state != .cancelled {
+    AcloudTransferProgress(stages:["Download","Check","Save to Photos"],stage:item.state == .restored || [.ready,.saving,.reconcile].contains(item.state) ? 2:item.state == .verifying ? 1:0,bytes:model.progress[item.id] ?? item.bytesDownloaded,total:item.evidence.expectedSize,activity:item.state.displayTitle,transferring:item.state == .downloading,complete:item.state == .restored,stopped:[.paused,.retryable,.permanent,.reconcile].contains(item.state))
    }
+   if item.state == .restored,let restoredAt=item.restoredAt{Text("Saved \(restoredAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.caption).foregroundStyle(.secondary)}
    if let code=item.lastErrorCode {Text(restoreGuidance(code)).font(.subheadline).foregroundStyle(.secondary)}
    if ![.restored,.saving,.reconcile,.cancelled].contains(item.state) {
-    ViewThatFits(in:.horizontal){HStack{restoreActions(item)};VStack(alignment:.leading){restoreActions(item)}}.buttonStyle(.bordered)
+    ViewThatFits(in:.horizontal){HStack{restoreActions(item)};VStack(alignment:.leading){restoreActions(item)}}.buttonStyle(.bordered).disabled(model.busy)
    }
    DisclosureGroup("Details & support") {
     VStack(alignment:.leading,spacing:6) {
@@ -270,7 +272,7 @@ struct RestoreView:View {
    AcloudMediaHeader(type:record.plan.manifest.mediaType,reference:record.plan.manifest.id,previewSource:.backupVersion,dateLabel:"Restore requested",date:record.createdAt,detail:"\(record.plan.resources.count) files · \(record.plan.manifest.kind.rawValue.replacingOccurrences(of:"_",with:" ").capitalized)")
    Text(record.state.displayTitle).font(.subheadline.weight(.semibold))
    if ![.restored,.saving,.reconcile,.cancelled].contains(record.state) {
-    HStack{Button("Pause"){Task{await model.compoundControl(record,"pause")}};Button("Retry"){Task{await model.compoundControl(record,"resume")}};Button("Cancel",role:.destructive){Task{await model.compoundControl(record,"cancel")}}}.buttonStyle(.bordered)
+    HStack{Button("Pause"){Task{await model.compoundControl(record,"pause")}};Button("Retry"){Task{await model.compoundControl(record,"resume")}};Button("Cancel",role:.destructive){Task{await model.compoundControl(record,"cancel")}}}.buttonStyle(.bordered).disabled(model.busy)
    }
    DisclosureGroup("Details & support"){Text("Transfer reference: R-\(record.id.uuidString.prefix(8))").font(.caption).textSelection(.enabled)}
   }.padding(.vertical,10)
