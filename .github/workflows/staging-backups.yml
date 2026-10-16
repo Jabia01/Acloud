@@ -10,7 +10,7 @@ on:
         required: true
         default: daily
         type: choice
-        options: [daily, monitor, restore]
+        options: [daily, monitor, restore, alert-test]
       force_restore:
         description: Also restore this backup in an isolated local database
         type: boolean
@@ -39,7 +39,7 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
       - name: Daily backup or manual recovery drill
-        if: github.event.schedule != '37 * * * *' && (github.event_name != 'workflow_dispatch' || inputs.mode != 'monitor')
+        if: github.event.schedule != '37 * * * *' && (github.event_name != 'workflow_dispatch' || inputs.mode != 'monitor' && inputs.mode != 'alert-test')
         env:
           BACKUP_SOURCE_JSON: ${{ secrets.BACKUP_SOURCE_JSON }}
           BACKUP_B2_JSON: ${{ secrets.BACKUP_B2_JSON }}
@@ -58,3 +58,10 @@ jobs:
           BACKUP_ALERT_FROM: ${{ vars.BACKUP_ALERT_FROM }}
           BACKUP_ALERT_TO: Privacy247.acloud@useacloud.com
         run: node run.mjs monitor
+      - name: Test backup alert delivery
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'alert-test'
+        env:
+          BACKUP_ALERT_RESEND_KEY: ${{ secrets.BACKUP_ALERT_RESEND_KEY }}
+          BACKUP_ALERT_FROM: ${{ vars.BACKUP_ALERT_FROM }}
+          BACKUP_ALERT_TO: Privacy247.acloud@useacloud.com
+        run: node alert-test.mjs

@@ -43,3 +43,7 @@ Application schema/database records only: not raw B2 media, global roles/passwor
 ## Tested evidence
 
 Policy/encryption/retention negative tests and downloaded-snapshot isolated restoration are recorded in the project progress ledger. Source least-privilege identity, actual GitHub schedule and delivered failure notification remain pending until activated and observed. Do not infer scheduled protection from these files alone.
+
+## Alert delivery test
+
+Dispatch the existing protected workflow with mode `alert-test` to send a clearly labelled test notification through the same sender used for backup failures. This mode reads only the alert key/from/to settings; it does not connect to the source database or backup bucket, trigger an outage, or change a success marker. The log reports the provider message ID and acceptance. Confirm delivery status and actual inbox receipt separately; provider acceptance alone is not inbox confirmation.
