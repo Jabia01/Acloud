@@ -88,6 +88,17 @@ public actor SQLiteBackupQueue {
   let s=try statement("SELECT record FROM queue WHERE id>? ORDER BY id LIMIT ?");defer{sqlite3_finalize(s)};bind(after?.uuidString ?? "",s,1);sqlite3_bind_int(s,2,Int32(limit))
   var result:[BackupItem]=[];while true{let r=sqlite3_step(s);if r==SQLITE_DONE{break};guard r==SQLITE_ROW else{throw BackupFailure.storage};result.append(try decode(s))};return result
  }
+ public func recent(before:BackupItem?=nil,limit:Int=100)throws->[BackupItem]{
+  guard (1...1000).contains(limit) else{throw BackupFailure.storage}
+  // Date is encoded numerically by JSONEncoder; UUID breaks equal-time ties.
+  let created="json_extract(CAST(record AS TEXT),'$.createdAt')"
+  let s=try statement("SELECT record FROM queue WHERE (? IS NULL OR (\(created),id)<(?,?)) ORDER BY \(created) DESC,id DESC LIMIT ?")
+  defer{sqlite3_finalize(s)}
+  if let before {sqlite3_bind_double(s,1,before.createdAt.timeIntervalSinceReferenceDate);sqlite3_bind_double(s,2,before.createdAt.timeIntervalSinceReferenceDate);bind(before.id.uuidString,s,3)}
+  else{sqlite3_bind_null(s,1);sqlite3_bind_null(s,2);sqlite3_bind_null(s,3)}
+  sqlite3_bind_int(s,4,Int32(limit));var result:[BackupItem]=[]
+  while true{let r=sqlite3_step(s);if r==SQLITE_DONE{break};guard r==SQLITE_ROW else{throw BackupFailure.storage};result.append(try decode(s))};return result
+ }
  public func due(now:Date=Date(),limit:Int=32) throws -> [BackupItem] {
   let s=try statement("SELECT record FROM queue WHERE state IN ('QUEUED','FAILED_RETRYABLE','UPLOADED','VERIFYING','PREPARING','UPLOADING') AND (retry_at IS NULL OR retry_at<=?) ORDER BY state,retry_at,id LIMIT ?");defer{sqlite3_finalize(s)}
   sqlite3_bind_double(s,1,now.timeIntervalSince1970);sqlite3_bind_int(s,2,Int32(max(1,min(limit,100))));var records:[BackupItem]=[]

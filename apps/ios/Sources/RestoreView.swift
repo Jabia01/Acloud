@@ -35,7 +35,8 @@ private extension RestoreState {
  @Published var progress:[UUID:Int]=[:]
  private var developmentTestAsset:UUID?
  private var ownerTestAssets:Set<UUID>?
- private var nextCursor:String?,queueCursor:UUID?,account:UUID?,device:UUID?,library:UUID?
+ private var nextCursor:String?,queueCursor:UUID?,queueAnchor:UUID?,account:UUID?,device:UUID?,library:UUID?
+ @Published var showingLaterQueuePage=false
  private var worker:Task<Void,Never>?
  private var compoundQueue:CompoundRestoreQueue?,compoundCoordinator:CompoundRestoreCoordinator?
  private var api:HTTPRestoreAPI?,queue:RestoreQueue?,coordinator:RestoreCoordinator?,files:RestoreFiles?
@@ -61,16 +62,17 @@ private extension RestoreState {
   await invalidate();let root=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RestoreQueue").appendingPathComponent(account.uuidString).appendingPathComponent(device.uuidString),files=try RestoreFiles(directory:root.appendingPathComponent("temporary")),queue=try RestoreQueue(url:root.appendingPathComponent("restore.sqlite"));let key="restore_library_"+account.uuidString+"_"+device.uuidString,library=UserDefaults.standard.string(forKey:key).flatMap(UUID.init(uuidString:)) ?? UUID();UserDefaults.standard.set(library.uuidString,forKey:key)
   guard let storageValue=Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String,let origin=URL(string:storageValue) else{throw RestoreFailure.authorization};let api=try HTTPRestoreAPI(base:base,tokens:store,allowLocalHTTP:_isDebugAssertConfiguration()),downloader=try FileRestoreDownloader(origin:origin,allowLocalHTTP:_isDebugAssertConfiguration()),coordinator=RestoreCoordinator(queue:queue,files:files,api:api,downloader:downloader,photos:PhotoKitRestorer());let compoundQueue=try CompoundRestoreQueue(url:root.appendingPathComponent("compound.sqlite")),compoundCoordinator=CompoundRestoreCoordinator(queue:compoundQueue,files:files,api:api,downloader:downloader,photos:CompoundPhotoKitRestorer());self.compoundQueue=compoundQueue;self.compoundCoordinator=compoundCoordinator;try await compoundCoordinator.activate(account:account,library:library);self.account=account;self.device=device;self.library=library;self.api=api;self.queue=queue;self.files=files;self.coordinator=coordinator;try await coordinator.activate(account:account,library:library);availableBytes=try? SystemDeviceCapacity().available(at:files.directory);canRestore=await restoreAllowed(auth)
  }
- func invalidate()async{worker?.cancel();await coordinator?.deactivate();await compoundCoordinator?.deactivate();await worker?.value;worker=nil;coordinator=nil;compoundCoordinator=nil;compoundQueue=nil;compounds=[];api=nil;queue=nil;files=nil;account=nil;device=nil;library=nil;assets=[];items=[];selected=[];progress=[:];nextCursor=nil;queueCursor=nil;canRestore=false}
+ func invalidate()async{worker?.cancel();await coordinator?.deactivate();await compoundCoordinator?.deactivate();await worker?.value;worker=nil;coordinator=nil;compoundCoordinator=nil;compoundQueue=nil;compounds=[];api=nil;queue=nil;files=nil;account=nil;device=nil;library=nil;assets=[];items=[];selected=[];progress=[:];nextCursor=nil;queueCursor=nil;queueAnchor=nil;showingLaterQueuePage=false;canRestore=false}
  func loadAssets(next:Bool=false)async{do{try await connect();guard let api else{return};let page=try await api.inventory(cursor:next ? nextCursor:nil);assets=page.items;
  #if DEBUG
- assets=assets.filter{(ownerTestAssets?.contains($0.id) ?? ($0.id==developmentTestAsset)) && ["image","video"].contains($0.mediaType)};nextCursor=nil
+ assets=assets.filter{(ownerTestAssets?.contains($0.id) ?? ($0.id==developmentTestAsset)) && ["image","video"].contains($0.mediaType)};nextCursor=page.nextCursor
  #else
  nextCursor=page.nextCursor
  #endif
 selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test: restore one disposable item at a time. This creates a new Photos copy; keep originals." : "Select protected versions explicitly. Restoring creates new Photos items."):"Real restore is disabled until server and physical-device acceptance."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
  var hasNextAssets:Bool{nextCursor != nil}
- func refresh(next:Bool=false)async{do{try await connect();if let queue,let account,let library{items=try await queue.page(account:account,library:library,after:next ? queueCursor:nil,limit:100);queueCursor=items.last?.id;if let compoundQueue{compounds=try await compoundQueue.page(account:account,library:library,limit:100)}};progress=await coordinator?.progressSnapshot() ?? [:]}catch{message="Restore is paused. Your queue is retained."}}
+ func refresh(next:Bool=false)async{do{try await connect();if let queue,let account,let library{if next{queueAnchor=queueCursor};let requestedAnchor=queueAnchor;let page=try await queue.page(account:account,library:library,after:requestedAnchor,limit:100);guard queueAnchor==requestedAnchor else{return};items=page;showingLaterQueuePage=queueAnchor != nil;queueCursor=items.last?.id;if let compoundQueue{compounds=try await compoundQueue.page(account:account,library:library,limit:100)}};progress=await coordinator?.progressSnapshot() ?? [:]}catch{message="Restore is paused. Your queue is retained."}}
+ func firstQueuePage()async{queueAnchor=nil;await refresh()}
  func enqueue(again:Bool=false)async{busy=true;defer{busy=false};do{try await connect();guard canRestore,let api,let queue,let account,let library else{throw RestoreFailure.disabled};if let availableBytes,selectedBytes*2>availableBytes-64*1024*1024{message="Insufficient estimated device space. Select a smaller batch; unrelated content is never removed.";return};let planner=RestorePlanner(queue:queue,photos:PhotoKitRestorer());
  #if DEBUG
  guard selected.count==1,let selectedID=selected.first,(ownerTestAssets?.contains(selectedID) ?? (selectedID==developmentTestAsset)) else{throw RestoreFailure.disabled}
@@ -156,7 +158,10 @@ struct RestoreView:View {
     ForEach(acloudMediaGroups(model.compounds.filter{mediaFilter.includes($0.plan.manifest.mediaType)},type:{$0.plan.manifest.mediaType},date:{$0.createdAt})){group in
      Section {ForEach(group.items){record in compoundRow(record)}} header:{AcloudMediaGroupTitle(title:group.title+" · complete-media restores",date:group.day)}
     }
-    if model.items.count==100{Section{Button("Next queue page"){Task{await model.refresh(next:true)}}}}
+    if model.items.count==100 || model.showingLaterQueuePage{Section{
+     if model.items.count==100{Button("Next queue page"){Task{await model.refresh(next:true)}}}
+     if model.showingLaterQueuePage{Button("First queue page"){Task{await model.firstQueuePage()}}}
+    }}
    }.acloudCanvas().navigationTitle("Restore")
   }.confirmationDialog("Create another Photos copy?",isPresented:$confirmAnother,titleVisibility:.visible){Button("Restore another copy"){Task{await model.enqueue(again:true)}}}message:{Text("A previous or uncertain restore may already exist. This creates another copy and never removes existing Photos items.")}
    .task{await model.loadAssets();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}

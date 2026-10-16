@@ -79,6 +79,13 @@ final class BackupEngineTests:XCTestCase {
   var q:SQLiteBackupQueue?=try SQLiteBackupQueue(url:url);_=try await q!.enqueue(item);q=nil
   let restarted=try SQLiteBackupQueue(url:url);let result=try await restarted.read(item.id);XCTAssertEqual(result?.state,.queued)
  }
+ func testRecentTransfersIncludeNewestAcross100RowBoundaryAndPageWithoutDuplicates()async throws{
+  let q=try SQLiteBackupQueue(url:directory().appendingPathComponent("recent.sqlite")),library=UUID();var newest:UUID?
+  for i in 0..<105{let id=UUID(uuidString:String(format:"%08X-0000-4000-8000-000000000000",i))!;let item=BackupItem(libraryID:library,localAssetIdentifier:"fixture-\(i)",mediaType:"test",id:id);_=try await q.enqueue(item);newest=id}
+  let first=try await q.recent(limit:100);XCTAssertEqual(first.count,100);XCTAssertEqual(first.first?.id,newest)
+  let second=try await q.recent(before:first.last,limit:100);XCTAssertEqual(second.count,5);XCTAssertTrue(Set(first.map(\.id)).isDisjoint(with:Set(second.map(\.id))))
+  let internalPage=try await q.page(limit:100);XCTAssertNotEqual(internalPage.first?.id,newest)
+ }
  func testDuplicateIdentityIsScopedToLibrary() async throws {
   let q=try SQLiteBackupQueue(url:directory().appendingPathComponent("queue.sqlite")),lib=UUID()
   let a=try await q.enqueue(BackupItem(libraryID:lib,localAssetIdentifier:"same",mediaType:"test"))

@@ -71,6 +71,9 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  @Published var canSelectOriginals=false
  @Published var originalProgress:Double=0
  @Published var selectionNotice:String?
+ @Published var hasOlderTransfers=false
+ @Published var showingOlderTransfers=false
+ private var transferAnchor:BackupItem?
  @Published var allowICloudOriginals=false
  private var deviceID:UUID?
  private var manifestReconcileCursor:UUID?
@@ -152,8 +155,10 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   #endif
  }
  func refresh() async {
-  do{try await connect();if let queue{summary=try await queue.summary();items=try await queue.page(limit:100)};await reconcileManifests()}catch{message="Backup connector unavailable. Device acceptance is pending."}
+  do{try await connect();if let queue{summary=try await queue.summary();let requestedAnchor=transferAnchor;let page=try await queue.recent(before:requestedAnchor,limit:100);guard transferAnchor?.id==requestedAnchor?.id else{return};items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil};await reconcileManifests()}catch{message="Backup connector unavailable. Device acceptance is pending."}
  }
+ func loadOlderTransfers()async{guard let last=items.last else{return};transferAnchor=last;await refresh()}
+ func loadLatestTransfers()async{transferAnchor=nil;await refresh()}
  func enqueueGenerated() async {
   #if !DEBUG
   message="Generated upload adapters are unavailable in beta Release. Real PhotoKit backup acceptance is pending."
@@ -171,6 +176,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  }
  func updateOriginalPolicy() async {await action{var policy=BackupPolicy();policy.allowICloudOriginals=self.allowICloudOriginals;try await self.engine?.setPolicy(policy)}}
  func enqueueSelected(_ ids:[String]) async {
+  transferAnchor=nil
   guard !ids.isEmpty else{selectionNotice="Photos did not provide access to that selection. Check Acloud’s Photos access in Settings, then choose the item again.";return}
   #if DEBUG
   await action(selection:true) {
@@ -228,7 +234,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    #endif
    defer{self.worker=nil};try? await engine.runDue();await self.refresh()}};await refresh()}catch{message="Waiting for account or API access."}
  }
- func stopForSignOut() async throws{worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;items=[];summary=[:]}
+ func stopForSignOut() async throws{worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
  func handleBackground(completion:@escaping @Sendable()->Void) async {
   backgroundCompletion={Task{@MainActor in
    // Drain in-process callbacks before reconciling daemon-completed parts.
@@ -287,7 +293,10 @@ struct BackupQueueView:View {
     ForEach(acloudMediaGroups(model.items.filter{transferFilter.includes($0.mediaType)},type:{$0.mediaType},date:{$0.createdAt})) {group in
      Section {ForEach(group.items){item in transferRow(item)}} header:{AcloudMediaGroupTitle(title:group.title+" · transfers",date:group.day)}
     }
-    if model.items.count==100 {Section {Text("Showing up to 100 recent transfers.").font(.footnote).foregroundStyle(.secondary)}}
+    if model.hasOlderTransfers || model.showingOlderTransfers {Section {
+     if model.hasOlderTransfers{Button("Older transfers"){Task{await model.loadOlderTransfers()}}}
+     if model.showingOlderTransfers{Button("Latest transfers"){Task{await model.loadLatestTransfers()}}}
+    }}
     if !model.manifests.isEmpty {
      Section("Backup completeness") {
       ForEach(model.manifests){manifest in

@@ -64,7 +64,7 @@ public struct AuthAPI {
         struct Gates: Decodable { let OWNER_DEVICE_TEST: Bool?; let OWNER_DEVICE_TEST_ASSET_IDS: [UUID]? }
         let data = try await request("restore/status", authenticated: true)
         let gates = try JSONDecoder().decode(Gates.self, from: data)
-        guard gates.OWNER_DEVICE_TEST == true, let ids = gates.OWNER_DEVICE_TEST_ASSET_IDS, ids.count <= 2 else { return nil }
+        guard gates.OWNER_DEVICE_TEST == true, let ids = gates.OWNER_DEVICE_TEST_ASSET_IDS, ids.count <= 100, Set(ids).count == ids.count else { return nil }
         return ids
     }
     public func developmentRestoreTestAssetID() async throws -> UUID? {struct Gates:Decodable{let DEVELOPMENT_RESTORE_TEST_ASSET_ID:UUID?};let data=try await request("restore/status",authenticated:true);return try JSONDecoder().decode(Gates.self,from:data).DEVELOPMENT_RESTORE_TEST_ASSET_ID}

@@ -60,6 +60,14 @@ final class AuthAPITests: XCTestCase {
         let tooMany = try await api.ownerDeviceTestRestoreAssets()
         XCTAssertNil(tooMany)
     }
+    func testProjectRestoreScopeAccepts100DistinctIDsAndRejects101() async throws {
+        store.value=String(repeating:"y",count:43)
+        let ids=(0..<100).map{_ in UUID()}
+        AuthProtocol.body=String(decoding:try JSONSerialization.data(withJSONObject:["OWNER_DEVICE_TEST":true,"OWNER_DEVICE_TEST_ASSET_IDS":ids.map(\.uuidString)]),as:UTF8.self)
+        let accepted=try await api.ownerDeviceTestRestoreAssets();XCTAssertEqual(accepted,ids)
+        AuthProtocol.body=String(decoding:try JSONSerialization.data(withJSONObject:["OWNER_DEVICE_TEST":true,"OWNER_DEVICE_TEST_ASSET_IDS":(ids+[UUID()]).map(\.uuidString)]),as:UTF8.self)
+        let rejected=try await api.ownerDeviceTestRestoreAssets();XCTAssertNil(rejected)
+    }
     func testCurrentDeviceUsesAuthenticatedSessionsRoute() async throws {
         store.value = String(repeating:"y",count:43)
         let device=UUID()
