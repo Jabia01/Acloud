@@ -2,6 +2,11 @@ import Foundation
 
 // Only opaque queue IDs and coarse states are persisted; never media metadata.
 struct TransferNotificationPolicy: Codable {
+    static func shouldPresentForeground(identifier: String, enabled: Bool, eventAllowed: Bool) -> Bool {
+        guard enabled,eventAllowed else { return false }
+        return ["transfer.test", "transfer.backup.protected", "transfer.backup.attention",
+                "transfer.restore.restored", "transfer.restore.attention"].contains(identifier)
+    }
     static func backupOutcome(state: String, isResource: Bool, error: String?) -> String {
         if state == "PROTECTED", !isResource { return "protected" }
         if state == "FAILED_PERMANENT" || (state == "PAUSED" &&

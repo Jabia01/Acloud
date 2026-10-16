@@ -10,6 +10,7 @@ import UIKit
     @Published private(set) var requestingPermission = false
     private let center = UNUserNotificationCenter.current()
     private var generation = 0
+    private var testNotificationActive = false
     private var activeScopes: Set<String> = []
     private var policies: [String: TransferNotificationPolicy] = [:]
 
@@ -52,12 +53,21 @@ import UIKit
         content.title = "Acloud notification test"
         content.body = "Notifications are working. This test does not change your backups."
         content.sound = .default
+        testNotificationActive = true
         do {
             try await center.add(UNNotificationRequest(identifier: "transfer.test", content: content,
                 trigger: UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)))
             if !enabled || currentGeneration != generation { clearDelivered(); return }
-            status = "Test scheduled. Lock your screen now; the alert is due in five seconds."
-        } catch { status = "The test alert could not be scheduled. Try again." }
+            status = "Test scheduled for five seconds from now. Keep Acloud open to check its banner, or lock the screen to check the lock-screen alert."
+        } catch { testNotificationActive = false; status = "The test alert could not be scheduled. Try again." }
+    }
+    func mayPresentForeground(_ identifier: String) -> Bool {
+        let eventAllowed: Bool
+        if identifier == "transfer.test" { eventAllowed = testNotificationActive }
+        else if identifier.hasPrefix("transfer.backup.") { eventAllowed = activeScopes.contains { $0.hasPrefix("backup.") } }
+        else if identifier.hasPrefix("transfer.restore.") { eventAllowed = activeScopes.contains { $0.hasPrefix("restore.") } }
+        else { eventAllowed = false }
+        return TransferNotificationPolicy.shouldPresentForeground(identifier: identifier, enabled: enabled, eventAllowed: eventAllowed)
     }
     func activate(_ scope: String) { activeScopes.insert(scope) }
     func signOut() {
@@ -67,6 +77,7 @@ import UIKit
         clearDelivered()
     }
     private func clearDelivered() {
+        testNotificationActive = false
         // This app schedules only transfer alerts. Clear them on opt-out/sign-out.
         center.removeAllPendingNotificationRequests()
         center.removeAllDeliveredNotifications()

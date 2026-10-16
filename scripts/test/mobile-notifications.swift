@@ -15,6 +15,14 @@ import Foundation
         precondition(TransferNotificationPolicy.restoreOutcome(state: "SAVING_TO_PHOTOS") == "active")
         precondition(TransferNotificationPolicy.restoreOutcome(state: "RESTORED") == "restored")
         precondition(TransferNotificationPolicy.restoreOutcome(state: "RECONCILE_REQUIRED") == "attention")
+        for id in ["transfer.test", "transfer.backup.protected", "transfer.backup.attention", "transfer.restore.restored", "transfer.restore.attention"] {
+            precondition(TransferNotificationPolicy.shouldPresentForeground(identifier: id, enabled: true, eventAllowed: true))
+            precondition(!TransferNotificationPolicy.shouldPresentForeground(identifier: id, enabled: false, eventAllowed: true))
+            precondition(!TransferNotificationPolicy.shouldPresentForeground(identifier: id, enabled: true, eventAllowed: false))
+        }
+        for id in ["unknown", "transfer.unknown", "transfer.backup.restored", "transfer.restore.protected"] {
+            precondition(!TransferNotificationPolicy.shouldPresentForeground(identifier: id, enabled: true, eventAllowed: true))
+        }
         var policy = TransferNotificationPolicy()
         // Enabling the feature must not announce existing successes/failures.
         precondition(policy.observe(["old":"protected", "failed":"attention", "new":"active"]).isEmpty)
@@ -43,6 +51,6 @@ import Foundation
         precondition(large.observe(rows).isEmpty)
         rows["item-250"] = "protected"
         precondition(large.observe(rows) == ["protected":1])
-        print("PASS: notification baseline, verified outcomes, aggregation, relaunch deduplication, retry, account isolation and 251-item history")
+        print("PASS: notification baseline, verified outcomes, aggregation, relaunch deduplication, retry, account isolation 251-item history and opt-out/session-gated foreground presentation")
     }
 }
