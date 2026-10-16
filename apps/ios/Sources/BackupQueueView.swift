@@ -403,7 +403,7 @@ struct BackupQueueView:View {
      Section("Backup completeness") {
       ForEach(model.manifests){manifest in
        VStack(alignment:.leading,spacing:10) {
-        AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,localID:manifest.source.localID,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
+        AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,previewSource:.backupVersion,sourceCaptureDate:manifest.source.creation,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
         Label(manifest.state == .fullyProtected ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files",systemImage:manifest.state == .fullyProtected ? "checkmark.shield.fill":"square.stack.3d.up")
         Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required files protected").font(.caption)
         DisclosureGroup("Details") {Text("All required files must verify together. Live Photo/edited-photo restore is a separate pending test; removing device copies remains disabled.").font(.footnote).foregroundStyle(.secondary)}
@@ -428,7 +428,7 @@ struct BackupQueueView:View {
  }
  private func transferRow(_ item:BackupItem)->some View {
   VStack(alignment:.leading,spacing:12) {
-   AcloudMediaHeader(type:item.mediaType,reference:item.id,localID:item.mediaResourceBinding?.sourceLocalID ?? item.originalManifest?.source.localID ?? (item.mediaType == "test" ? nil:item.localAssetIdentifier),dateLabel:"Backup added",date:item.createdAt,detail:item.mediaType == "test" ? "Generated or supporting file":nil)
+   AcloudMediaHeader(type:item.mediaType,reference:item.id,localID:item.state == .protected ? nil:(item.mediaResourceBinding?.sourceLocalID ?? item.originalManifest?.source.localID ?? (item.mediaType == "test" ? nil:item.localAssetIdentifier)),previewSource:item.state == .protected ? .backupVersion:.device,sourceCaptureDate:item.originalManifest?.source.creation,dateLabel:"Backup added",date:item.createdAt,detail:item.mediaType == "test" ? "Generated or supporting file":nil)
    Label(item.state.displayTitle,systemImage:item.state == .protected ? "checkmark.shield.fill":item.state == .failedPermanent || item.state == .failedRetryable ? "exclamationmark.circle":"arrow.up.circle")
     .font(.subheadline.weight(.semibold)).foregroundStyle(item.state == .protected ? AcloudStyle.accent:Color.primary)
    if item.state == .protected {

@@ -144,10 +144,13 @@ struct AcloudMediaGroupTitle:View {
         }
     }
 }
+enum AcloudPreviewSource { case device, backupVersion }
 struct AcloudMediaHeader:View {
     let type:String
     let reference:UUID
     var localID:String?=nil
+    var previewSource:AcloudPreviewSource = .device
+    var sourceCaptureDate:Date?=nil
     let dateLabel:String
     let date:Date?
     var detail:String?=nil
@@ -157,13 +160,20 @@ struct AcloudMediaHeader:View {
             ZStack(alignment:.bottomTrailing) {
                 RoundedRectangle(cornerRadius:12).fill(AcloudStyle.accent.opacity(0.1))
                 Image(systemName:type == "video" ? "video.fill":type == "image" ? "photo.fill":"doc.fill").foregroundStyle(AcloudStyle.accent)
-                AcloudLocalThumbnail(localID:localID,captureDate:$capturedAt).clipShape(RoundedRectangle(cornerRadius:12))
+                if previewSource == .device {
+                    AcloudLocalThumbnail(localID:localID,captureDate:$capturedAt).clipShape(RoundedRectangle(cornerRadius:12))
+                }
                 if type == "video" {Image(systemName:"play.fill").font(.caption2).padding(6).foregroundStyle(.white).background(.black.opacity(0.65),in:Circle()).padding(5)}
             }.frame(width:76,height:76).accessibilityHidden(true)
             VStack(alignment:.leading,spacing:5) {
                 Text("\(type == "video" ? "Video":type == "image" ? "Photo":"File") · \(reference.uuidString.prefix(6))")
                     .font(.headline).foregroundStyle(.primary)
-                if let capturedAt {Text("Taken \(capturedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.subheadline).foregroundStyle(.secondary)}
+                if let taken=sourceCaptureDate ?? (previewSource == .device ? capturedAt:nil) {Text("Taken \(taken.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.subheadline).foregroundStyle(.secondary)}
+                if previewSource == .backupVersion {
+                    Text("Backup preview unavailable").font(.caption).foregroundStyle(.secondary)
+                } else if localID != nil {
+                    Text("Current device preview").font(.caption).foregroundStyle(.secondary)
+                }
                 if let date {Text("\(dateLabel) \(date.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.caption).foregroundStyle(.secondary)}
                 else {Text("\(dateLabel) date unavailable").font(.caption).foregroundStyle(.secondary)}
                 if let detail {Text(detail).font(.caption).foregroundStyle(.secondary)}
