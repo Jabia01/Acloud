@@ -164,6 +164,24 @@ public actor BackupCoordinator {
   }
   item.state = .queued;item.retryCount=0;item.nextRetryAt=nil;item.lastErrorCode=nil;_=try await queue.save(item)
  }
+ public func settleCancellation(_ id:UUID)async throws->BackupItem {
+  guard let old=try await queue.read(id),old.state == .cancelled else{throw BackupFailure.illegalTransition}
+  await transport.cancel(item:id)
+  if let running=active[id]{_=try? await running.value}
+  // Resolve a lost create/cancel response, or a verification that already won.
+  try await run(id)
+  guard let settled=try await queue.read(id),settled.state == .protected || settled.state == .cancelled && !settled.cancellationPending else{throw BackupFailure.http(503)}
+  return settled
+ }
+ public func restartCancelled(_ id:UUID)async throws->UUID {
+  let settled=try await settleCancellation(id)
+  if settled.state == .protected{return settled.id}
+  if let latest=try await queue.find(library:settled.libraryID,localID:settled.localAssetIdentifier),latest.id != id {
+   if latest.state == .cancelled{return try await restartCancelled(latest.id)}
+   return latest.id
+  }
+  return try await queue.enqueueAgain(afterCancelled:id)
+ }
  public func cancel(_ id:UUID) async throws {
   guard var item=try await queue.read(id),item.state != .protected else{return}
   item.state = .cancelled;item.cancellationPending=true;_=try await queue.save(item);let running=active[id];running?.cancel();await transport.cancel(item:id)

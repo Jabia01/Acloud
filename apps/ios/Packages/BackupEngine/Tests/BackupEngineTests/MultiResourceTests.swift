@@ -11,4 +11,23 @@ final class MultiResourceTests:XCTestCase{
  func testICloudRequiredRetainsWaitingState()async throws{let(m,s,f,p,i,_)=try await fixture();await f.requireNetwork();do{_=try await p.prepare(i,policy:BackupPolicy(),network:NetworkSnapshot());XCTFail()}catch{};let actual=try await s.read(m.id);XCTAssertEqual(actual?.resources[0].waitingForNetwork,true);let calls=await f.calls;XCTAssertEqual(calls,[false])}
  func testCrossAccountCaptureRejected()async throws{let(_,_,_,p,original,_)=try await fixture();var i=original;i.accountID=UUID();do{_=try await p.prepare(i,policy:BackupPolicy(),network:NetworkSnapshot());XCTFail()}catch{}}
  func testPartialManifestSurvivesSQLiteRestart()async throws{let(m,_,_,p,i,root)=try await fixture();_=try await p.prepare(i,policy:BackupPolicy(),network:NetworkSnapshot());let reopened=try ManifestStore(url:root.appendingPathComponent("manifest.sqlite")),actual=try await reopened.read(m.id);XCTAssertEqual(actual?.resources[0].expectedSize,100);XCTAssertNil(actual?.resources[1].expectedSha256)}
+ func testNewManifestAttemptWinsOverMatchingCancelledHistory()async throws{
+  let(m,store,source,_,_,root)=try await fixture(),queue=try SQLiteBackupQueue(url:root.appendingPathComponent("queue.sqlite")),planner=MultiResourceBackupPlanner(store:store,queue:queue)
+  _=try await planner.enqueue(m,binding:m.binding)
+  var cancelledRecord=try await queue.read(m.resources[0].id);cancelledRecord?.state = .cancelled
+  _=try await queue.save(try XCTUnwrap(cancelledRecord))
+  let snapshot=await source.snapshot(m.source.localID)
+  let fallback=try await planner.existing(source:snapshot,binding:m.binding);XCTAssertEqual(fallback?.id,m.id)
+  let fresh=try await planner.captureExplicit(source:snapshot,binding:m.binding);_=try await planner.enqueue(fresh,binding:m.binding)
+  let selected=try await planner.existing(source:snapshot,binding:m.binding),rows=try await queue.page()
+  XCTAssertEqual(selected?.id,fresh.id);XCTAssertEqual(rows.count,4)
+  let repeated=try await planner.existing(source:snapshot,binding:m.binding);XCTAssertEqual(repeated?.id,fresh.id)
+  let old=try await queue.read(m.resources[0].id);XCTAssertEqual(old?.state,.cancelled)
+ }
+ func testReusableManifestSelectionCannotCrossAccountBinding()async throws{
+  let(m,store,source,_,_,root)=try await fixture(),queue=try SQLiteBackupQueue(url:root.appendingPathComponent("queue.sqlite")),planner=MultiResourceBackupPlanner(store:store,queue:queue)
+  let snapshot=await source.snapshot(m.source.localID),wrong=ManifestBinding(accountID:UUID(),deviceID:m.binding.deviceID,libraryID:m.binding.libraryID)
+  let result=try await planner.existing(source:snapshot,binding:wrong);XCTAssertNil(result)
+ }
+
 }

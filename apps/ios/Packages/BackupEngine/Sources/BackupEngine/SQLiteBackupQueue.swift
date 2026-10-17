@@ -50,6 +50,23 @@ public actor SQLiteBackupQueue {
   bind(item.libraryID.uuidString,lookup,1); bind(item.localAssetIdentifier,lookup,2)
   guard sqlite3_step(lookup)==SQLITE_ROW else { throw BackupFailure.storage }; return try decode(lookup).id
  }
+ // Explicit replacement keeps cancelled history immutable and frees only its dedup key.
+ public func enqueueAgain(afterCancelled id:UUID)throws->UUID {
+  guard let old=try read(id),old.state == .cancelled,!old.cancellationPending,old.mediaResourceBinding==nil else{throw BackupFailure.illegalTransition}
+  if let latest=try find(library:old.libraryID,localID:old.localAssetIdentifier),latest.id != id{return latest.id}
+  var fresh=BackupItem(libraryID:old.libraryID,localAssetIdentifier:old.localAssetIdentifier,mediaType:old.mediaType)
+  fresh.accountID=old.accountID;fresh.deviceID=old.deviceID
+  guard sqlite3_exec(db,"BEGIN IMMEDIATE",nil,nil,nil)==SQLITE_OK else{throw BackupFailure.storage}
+  do {
+   let archive=try statement("UPDATE queue SET local_id=? WHERE id=? AND state='CANCELLED' AND revision=?")
+   defer{sqlite3_finalize(archive)}
+   bind("cancelled-attempt:"+id.uuidString,archive,1);bind(id.uuidString,archive,2);sqlite3_bind_int(archive,3,Int32(old.revision));try done(archive)
+   guard sqlite3_changes(db)==1 else{throw BackupFailure.staleWrite}
+   let inserted=try enqueue(fresh);guard inserted==fresh.id else{throw BackupFailure.staleWrite}
+   guard sqlite3_exec(db,"COMMIT",nil,nil,nil)==SQLITE_OK else{throw BackupFailure.storage}
+   return inserted
+  }catch{sqlite3_exec(db,"ROLLBACK",nil,nil,nil);throw error}
+ }
  public func find(library:UUID,localID:String) throws -> BackupItem? {
   let s=try statement("SELECT record FROM queue WHERE library_id=? AND local_id=?"); defer{sqlite3_finalize(s)}
   bind(library.uuidString,s,1);bind(localID,s,2); let r=sqlite3_step(s); if r==SQLITE_DONE{return nil};guard r==SQLITE_ROW else{throw BackupFailure.storage};return try decode(s)

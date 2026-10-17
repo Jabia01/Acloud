@@ -248,15 +248,19 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
       let snapshot=try await PhotoKitMediaSource().snapshot(id)
       guard OwnerComplexBackupPolicy.permits(snapshot),let store=self.manifestStore,let api=self.manifestAPI,let binding=self.preservationBinding,
             binding.accountID==account,binding.deviceID==device,binding.libraryID==library else{return .unsupported}
-      var existing:MediaManifest?,cursor:UUID?
-      repeat {
-       let page=try await store.page(binding:binding,after:cursor,limit:100)
-       existing=page.first(where:{$0.source.localID==id && $0.matches(snapshot) && $0.state != .sourceChanged})
-       if existing != nil || page.count<100{break};cursor=page.last?.id
-      }while true
       let planner=MultiResourceBackupPlanner(store:store,queue:queue)
+      let existing=try await planner.existing(source:snapshot,binding:binding)
       let manifest:MediaManifest
-      if let existing{manifest=existing}else{manifest=try await planner.captureExplicit(source:snapshot,binding:binding)}
+      var replaceCancelled=false
+      if let existing {
+       for resource in existing.resources {
+        if let queued=try await queue.read(resource.id),queued.state == .cancelled {
+         guard let engine=self.engine else{throw BackupFailure.missing}
+         if try await engine.settleCancellation(queued.id).state == .cancelled{replaceCancelled=true}
+        }
+       }
+      }
+      if let existing,!replaceCancelled{manifest=existing}else{manifest=try await planner.captureExplicit(source:snapshot,binding:binding)}
       _=try await api.createManifest(manifest)
       guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library,self.complexBackupTestAvailable else{return .failed}
       var newResource=false
@@ -271,6 +275,11 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
      guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library else{return .failed}
      var item=BackupItem(libraryID:library,localAssetIdentifier:id,mediaType:descriptor.mediaType)
      item.accountID=account;item.deviceID=device
+     if let previous=try await queue.find(library:library,localID:id),previous.state == .cancelled {
+      guard let engine=self.engine else{throw BackupFailure.missing}
+      let fresh=try await engine.restartCancelled(previous.id)
+      return fresh==previous.id ? .existing:.added
+     }
      let queuedID=try await queue.enqueue(item)
      return queuedID==item.id ? .added:.existing
      #else
@@ -329,6 +338,18 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  func retry(_ id:UUID) async{await action{try await self.engine?.retryFailed(id)}}
  func pause(_ id:UUID) async{await action{try await self.engine?.pause(id)}}
  func resume(_ id:UUID) async{await action{try await self.engine?.resume(id)}}
+ func restart(_ id:UUID)async {
+  if let item=items.first(where:{$0.id==id}),let binding=item.mediaResourceBinding {
+   do{try await connect();guard let engine else{throw BackupFailure.missing};let settled=try await engine.settleCancellation(id)
+    guard settled.state == .cancelled else{await refresh();return}
+    await enqueueSelected([binding.sourceLocalID]);await tick()
+   }catch{selectionNotice="Could not start again yet. Check your connection and try again; your original is unchanged."}
+   return
+  }
+  transferAnchor=nil
+  await action{guard let engine=self.engine,let queue=self.queue else{throw BackupFailure.missing};let fresh=try await engine.restartCancelled(id);let current=try await queue.read(fresh);self.selectionNotice=current?.state == .protected ? "This item is already verified and protected." : current?.state == .queued ? "Backup queued again. The cancelled attempt remains in your history." : "This item has a newer attempt. Open the latest transfer to continue."}
+  await tick()
+ }
  func cancel(_ id:UUID) async{await action{try await self.engine?.cancel(id)}}
  func tick() async {
   do{try await connect();if worker==nil,let engine{worker=Task{
@@ -512,7 +533,7 @@ struct BackupQueueView:View {
     if [.uploaded,.verifying].contains(item.state) {Text("Upload finished. Waiting for integrity checks before protection is confirmed.").font(.caption).foregroundStyle(.secondary)}
    }
    if [.paused,.failedPermanent,.failedRetryable].contains(item.state),let guidance=backupGuidance(item) {Text(guidance).font(.subheadline).foregroundStyle(.secondary)}
-   if ![BackupState.protected,.cancelled].contains(item.state) {
+   if item.state != .protected {
     ViewThatFits(in:.horizontal){HStack{transferActions(item)};VStack(alignment:.leading){transferActions(item)}}
      .buttonStyle(.bordered).controlSize(.regular).disabled(model.busy)
    }
@@ -527,10 +548,11 @@ struct BackupQueueView:View {
   }.padding(.vertical,10)
  }
  @ViewBuilder private func transferActions(_ item:BackupItem)->some View {
-  if [.failedPermanent,.failedRetryable].contains(item.state) {Button("Retry"){Task{await model.retry(item.id)}}}
+  if item.state == .cancelled {Button("Back up again"){Task{await model.restart(item.id)}}}
+  else if [.failedPermanent,.failedRetryable].contains(item.state) {Button("Retry"){Task{await model.retry(item.id)}}}
   else if item.state == .paused {Button("Resume"){Task{await model.resume(item.id)}}}
   else {Button("Pause"){Task{await model.pause(item.id)}}}
-  Button("Cancel",role:.destructive){Task{await model.cancel(item.id)}}
+  if item.state != .cancelled {Button("Cancel",role:.destructive){Task{await model.cancel(item.id)}}}
  }
 }
 

@@ -10,7 +10,7 @@ private func asset(_ id:UUID,status:String,size:Int) throws -> ServerAsset {
 }
 private actor TestAPI:MultipartAPI {
  let id=UUID(),assetID=UUID();var phase:RemoteAssetStatus = .queued;var size=0;var accepted:[CompletedPart]=[]
- var creates=0;var completed=false;var verificationUnavailable=false;var cancelled=false;var authorizations=0
+ var creates=0;var completed=false;var verificationUnavailable=false;var cancelled=false;var authorizations=0;var cancellationUnavailable=false
  func create(_ item:BackupItem) -> MultipartSession {creates+=1;size=item.expectedSizeBytes!;return response()}
  func response() -> MultipartSession {MultipartSession(id:id,assetId:assetID,status:phase,partSizeBytes:5*1024*1024)}
  func status(_ id:UUID) -> MultipartSession{response()}
@@ -23,7 +23,8 @@ private actor TestAPI:MultipartAPI {
  func complete(_ id:UUID) -> MultipartSession{completed=true;phase = .uploaded;return response()}
  func verify(_ id:UUID) throws -> MultipartSession{if verificationUnavailable{throw BackupFailure.http(503)};phase = .protected;return response()}
  func asset(_ id:UUID) throws -> ServerAsset{try BackupEngineTests.remote(assetID,status:phase.rawValue,size:size)}
- func cancel(_ id:UUID){cancelled=true;phase = .cancelled}
+ func cancel(_ id:UUID)throws{if cancellationUnavailable{throw BackupFailure.http(503)};cancelled=true;phase = .cancelled}
+ func failCancellation(_ value:Bool){cancellationUnavailable=value}
  func accept(_ number:Int,size:Int){accepted.removeAll{$0.partNumber==number};accepted.append(CompletedPart(partNumber:number,sizeBytes:size))}
  func failVerification(_ value:Bool){verificationUnavailable=value}
  func forceProtected(size:Int){self.size=size;phase = .protected;completed=true}
@@ -191,6 +192,53 @@ final class BackupEngineTests:XCTestCase {
  func testStaleQueueAlreadyProtectedNeverTransfers() async throws {
   let(q,e,api,t,item,_,_)=try await fixture(bytes:100);var r=item;r.assetID=api.assetID;r.sessionID=api.id;r.expectedSizeBytes=100;_=try await q.save(r);await api.forceProtected(size:100)
   try await e.reconcileStartup();try await e.run(item.id);let parts=await t.numbers;XCTAssertTrue(parts.isEmpty);let result=try await q.read(item.id);XCTAssertEqual(result?.state,.protected)
+ }
+ func testCancelledBackupCanStartFreshWithoutLosingHistoryOrDeduplication()async throws{
+  let(q,e,api,_,item,files,d)=try await fixture(bytes:100)
+  var started=item;started.sessionID=api.id;started.assetID=api.assetID;started.expectedSizeBytes=100;started.expectedChecksum=String(repeating:"a",count:64);started.bytesUploaded=50;_=try await q.save(started)
+  try await e.cancel(item.id);let freshID=try await e.restartCancelled(item.id)
+  let freshRecord=try await q.read(freshID),oldRecord=try await q.read(item.id)
+  let fresh=try XCTUnwrap(freshRecord),old=try XCTUnwrap(oldRecord)
+  XCTAssertNotEqual(freshID,item.id);XCTAssertNotEqual(fresh.uploadKey,item.uploadKey)
+  XCTAssertEqual(old.state,.cancelled);XCTAssertEqual(old.sessionID,api.id);XCTAssertFalse(old.cancellationPending)
+  XCTAssertEqual(fresh.state,.queued);XCTAssertNil(fresh.sessionID);XCTAssertNil(fresh.assetID);XCTAssertNil(fresh.expectedChecksum);XCTAssertNil(fresh.originalManifest);XCTAssertEqual(fresh.bytesUploaded,0)
+  let latest=try await q.find(library:item.libraryID,localID:item.localAssetIdentifier);XCTAssertEqual(latest?.id,freshID)
+  let repeated=try await e.restartCancelled(item.id);XCTAssertEqual(repeated,freshID)
+  let duplicate=try await q.enqueue(BackupItem(libraryID:item.libraryID,localAssetIdentifier:item.localAssetIdentifier,mediaType:"test"));XCTAssertEqual(duplicate,freshID)
+  let nextAPI=TestAPI(),nextTransport=TestTransport(api:nextAPI),next=BackupCoordinator(queue:q,api:nextAPI,transport:nextTransport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await next.setNetwork(NetworkSnapshot());try await next.run(freshID)
+  let verified=try await q.read(freshID),history=try await q.recent();XCTAssertEqual(verified?.state,.protected);XCTAssertNotEqual(verified?.sessionID,old.sessionID);XCTAssertEqual(history.count,2)
+  XCTAssertTrue(FileManager.default.fileExists(atPath:d.appendingPathComponent("source").appendingPathComponent(item.localAssetIdentifier+".bin").path))
+ }
+ func testRestartFromOlderCancelledHistoryFindsLatestCancelledAttempt()async throws{
+  let(q,e,_,_,item,_,_)=try await fixture(bytes:100)
+  try await e.cancel(item.id);let second=try await e.restartCancelled(item.id)
+  try await e.cancel(second);let third=try await e.restartCancelled(item.id)
+  XCTAssertNotEqual(third,item.id);XCTAssertNotEqual(third,second)
+  let latest=try await q.find(library:item.libraryID,localID:item.localAssetIdentifier),history=try await q.recent()
+  XCTAssertEqual(latest?.id,third);XCTAssertEqual(latest?.state,.queued);XCTAssertEqual(history.filter{$0.state == .cancelled}.count,2);XCTAssertEqual(history.count,3)
+ }
+ func testRestartWaitsForRemoteCancellationAcknowledgement()async throws{
+  let(q,e,api,_,item,_,_)=try await fixture(bytes:100)
+  var started=item;started.sessionID=api.id;started.assetID=api.assetID;_=try await q.save(started)
+  await api.failCancellation(true);do{try await e.cancel(item.id);XCTFail("Cancellation should be pending")}catch{}
+  do{_=try await e.restartCancelled(item.id);XCTFail("Cannot create another attempt before cancellation acknowledgement")}catch{}
+  let pending=try await q.read(item.id),history=try await q.recent();XCTAssertEqual(pending?.state,.cancelled);XCTAssertTrue(pending?.cancellationPending == true);XCTAssertEqual(history.count,1)
+  await api.failCancellation(false);let fresh=try await e.restartCancelled(item.id);XCTAssertNotEqual(fresh,item.id)
+ }
+ func testRestartReconcilesProtectionThatWonCancellationRace()async throws{
+  let(q,e,api,_,item,_,_)=try await fixture(bytes:100)
+  var started=item;started.sessionID=api.id;started.assetID=api.assetID;started.expectedSizeBytes=100;_=try await q.save(started)
+  try await e.cancel(item.id);await api.forceProtected(size:100)
+  let result=try await e.restartCancelled(item.id),protected=try await q.read(item.id),history=try await q.recent()
+  XCTAssertEqual(result,item.id);XCTAssertEqual(protected?.state,.protected);XCTAssertEqual(history.count,1)
+  do{_=try await q.enqueueAgain(afterCancelled:item.id);XCTFail("Protected history must not be replaced")}catch{}
+ }
+ func testRestartArchiveCollisionRollsBackWithoutLosingCancelledLookup()async throws{
+  let(q,e,_,_,item,_,_)=try await fixture(bytes:100);try await e.cancel(item.id);_=try await e.settleCancellation(item.id)
+  _=try await q.enqueue(BackupItem(libraryID:item.libraryID,localAssetIdentifier:"cancelled-attempt:"+item.id.uuidString,mediaType:"test"))
+  do{_=try await q.enqueueAgain(afterCancelled:item.id);XCTFail("Expected uniqueness collision")}catch{}
+  let found=try await q.find(library:item.libraryID,localID:item.localAssetIdentifier),history=try await q.recent();XCTAssertEqual(found?.id,item.id);XCTAssertEqual(found?.state,.cancelled);XCTAssertEqual(history.count,2)
  }
  func testCancelNeverDeletesGeneratedSource() async throws {
   let(q,e,_,_,item,_,d)=try await fixture(bytes:100);try await e.cancel(item.id);try await e.run(item.id)

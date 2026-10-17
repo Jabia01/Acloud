@@ -33,6 +33,20 @@ public struct MultiResourcePreparer:ResourcePreparer{
 public struct MultiResourceBackupPlanner:Sendable{
  public let store:ManifestStore,queue:SQLiteBackupQueue
  public init(store:ManifestStore,queue:SQLiteBackupQueue){self.store=store;self.queue=queue}
+ // Prefer the current live/protected version over matching cancelled history.
+ public func existing(source:MediaSourceSnapshot,binding:ManifestBinding)async throws->MediaManifest? {
+  var cursor:UUID?,cancelled:MediaManifest?
+  while true {
+   let page=try await store.page(binding:binding,after:cursor,limit:100)
+   for manifest in page where manifest.source.localID==source.localID && manifest.matches(source) && manifest.state != .sourceChanged {
+    var hasCancelled=false
+    for resource in manifest.resources {if try await queue.read(resource.id)?.state == .cancelled{hasCancelled=true;break}}
+    if !hasCancelled{return manifest}
+    if cancelled==nil{cancelled=manifest}
+   }
+   if page.count<100{return cancelled};cursor=page.last?.id
+  }
+ }
  public func captureExplicit(source:MediaSourceSnapshot,binding:ManifestBinding)async throws->MediaManifest{let manifest=MediaManifest(binding:binding,source:source);try await store.insert(manifest);return manifest}
  public func enqueue(_ manifest:MediaManifest,binding:ManifestBinding)async throws->[UUID]{guard manifest.binding==binding,manifest.manifestVersion==1,manifest.source.enumerationValid,manifest.state != .sourceChanged else{throw BackupFailure.unsupported};var ids:[UUID]=[];for r in manifest.resources{if r.status=="PROTECTED"{continue};var item=BackupItem(libraryID:binding.libraryID,localAssetIdentifier:r.id.uuidString,mediaType:[2,6,9,10,11,12].contains(r.descriptor.resourceType) ? "video":[1,4,5,8,19].contains(r.descriptor.resourceType) ? "image":"test",id:r.id);item.accountID=binding.accountID;item.deviceID=binding.deviceID;item.mediaResourceBinding=ManifestResourceBinding(manifest:manifest,resource:r);ids.append(try await queue.enqueue(item))};return ids}
 }
