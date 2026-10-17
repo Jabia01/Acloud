@@ -52,6 +52,7 @@ struct AccountView: View {
         guard let api else { message = "API configuration unavailable."; return }
         busy = true; defer { busy = false }
         TransferNotifications.shared.signOut()
+        AcloudPreviewRegistry.shared.clear()
         await RestoreModel.shared.invalidate()
         await StorageScreen.model.invalidate()
         do { try await BackupQueueModel.shared.stopForSignOut(); account = try await api.login(email: email, password: password, deviceIdentifier: deviceIdentifier); password = ""; message = "" }
@@ -66,6 +67,7 @@ struct AccountView: View {
     @MainActor private func signOut() async {
         guard let api else { return }
         busy = true; defer { busy = false }
+        AcloudPreviewRegistry.shared.clear()
         await RestoreModel.shared.invalidate()
         await StorageScreen.model.invalidate()
         do { try await BackupQueueModel.shared.stopForSignOut(); try await api.logout(); TransferNotifications.shared.signOut(); account = nil; message = "Signed out." }

@@ -89,6 +89,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  private var monitor:BackupNetworkMonitor?
  private var source:URL?
  private var library:UUID?
+ var previewAccount:UUID? {accountID.flatMap(UUID.init(uuidString:))}
  private var accountID:String?
  private var worker:Task<Void,Never>?
  var backgroundCompletion:(@Sendable()->Void)?
@@ -156,7 +157,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   let preparer:any ResourcePreparer=PreservationResourcePreparer(ordinary:ordinary,multiple:MultiResourcePreparer(source:PhotoKitMediaSource(),store:store,files:files,binding:binding,invalidate:{id,fingerprint in try? await multipartAPI.invalidateManifest(id,fingerprint:fingerprint)}))
   canSelectOriginals=true
   #endif
-  let e=BackupCoordinator(queue:q,api:multipartAPI,transport:transfer,preparer:preparer,files:files)
+  let e=BackupCoordinator(queue:q,api:multipartAPI,transport:transfer,preparer:AcloudPreviewPreparer(wrapped:preparer,queue:q,files:files),files:files)
   queue=q;engine=e;transport=transfer;library=lib;accountID=account.id;monitor=BackupNetworkMonitor(coordinator:e)
   if let completion=backgroundCompletion{transfer.reconnect(completion:completion);backgroundCompletion=nil}
   var policy=BackupPolicy();policy.allowICloudOriginals=allowICloudOriginals;try await e.setPolicy(policy)
@@ -332,7 +333,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    #endif
    defer{self.worker=nil};try? await engine.runDue();await self.refresh()}};await refresh()}catch{message="Waiting for account or API access."}
  }
- func stopForSignOut() async throws{alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;complexBackupTestAvailable=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
+ func stopForSignOut() async throws{AcloudPreviewRegistry.shared.clear();alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;complexBackupTestAvailable=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
  func handleBackground(completion:@escaping @Sendable()->Void) async {
   backgroundCompletion={Task{@MainActor in
    // Drain in-process callbacks before reconciling daemon-completed parts.
@@ -418,7 +419,7 @@ struct BackupQueueView:View {
      Section("Backup completeness") {
       ForEach(model.manifests){manifest in
        VStack(alignment:.leading,spacing:10) {
-        AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,previewSource:.backupVersion,sourceCaptureDate:manifest.source.creation,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
+        AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,previewSource:.backupVersion,sourceCaptureDate:manifest.source.creation,previewAccount:manifest.binding.accountID,previewAsset:previewResource(manifest)?.serverAssetID,previewChecksum:previewResource(manifest)?.expectedSha256,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
         Label([.fullyProtected,.restoreReady].contains(manifest.state) ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files",systemImage:[.fullyProtected,.restoreReady].contains(manifest.state) ? "checkmark.shield.fill":"square.stack.3d.up")
         ProgressView(value:Double(manifest.required.filter{$0.status=="PROTECTED"}.count),total:Double(max(1,manifest.required.count))).accessibilityLabel("Required files verified")
         Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required files protected").font(.caption)
@@ -442,9 +443,13 @@ struct BackupQueueView:View {
    .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
    .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
  }
+ private func previewResource(_ manifest:MediaManifest)->ManifestResource? {
+  let verified=manifest.required.filter{$0.status=="PROTECTED"}
+  return verified.first{$0.descriptor.role == .edited} ?? verified.first{[.still,.jpeg].contains($0.descriptor.role)}
+ }
  private func transferRow(_ item:BackupItem)->some View {
   VStack(alignment:.leading,spacing:12) {
-   AcloudMediaHeader(type:item.mediaType,reference:item.id,localID:item.state == .protected ? nil:(item.mediaResourceBinding?.sourceLocalID ?? item.originalManifest?.source.localID ?? (item.mediaType == "test" ? nil:item.localAssetIdentifier)),previewSource:item.state == .protected ? .backupVersion:.device,sourceCaptureDate:item.originalManifest?.source.creation,dateLabel:"Backup added",date:item.createdAt,detail:item.mediaType == "test" ? "Generated or supporting file":nil)
+   AcloudMediaHeader(type:item.mediaType,reference:item.id,localID:item.state == .protected ? nil:(item.mediaResourceBinding?.sourceLocalID ?? item.originalManifest?.source.localID ?? (item.mediaType == "test" ? nil:item.localAssetIdentifier)),previewSource:item.state == .protected ? .backupVersion:.device,sourceCaptureDate:item.originalManifest?.source.creation,previewAccount:item.state == .protected ? model.previewAccount:nil,previewAsset:item.assetID,previewChecksum:item.expectedChecksum,dateLabel:"Backup added",date:item.createdAt,detail:item.mediaType == "test" ? "Generated or supporting file":nil)
    Label(item.state.displayTitle,systemImage:item.state == .protected ? "checkmark.shield.fill":item.state == .failedPermanent || item.state == .failedRetryable ? "exclamationmark.circle":"arrow.up.circle")
     .font(.subheadline.weight(.semibold)).foregroundStyle(item.state == .protected ? AcloudStyle.accent:Color.primary)
    if item.state != .cancelled {

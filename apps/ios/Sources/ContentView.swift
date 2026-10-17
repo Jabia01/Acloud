@@ -2,6 +2,8 @@ import SwiftUI
 import HealthClient
 import Photos
 import UIKit
+import BackupEngine
+import RestoreEngine
 
 struct ContentView: View {
     @AppStorage("selectedTransferTab") private var selectedTab = "backup"
@@ -151,6 +153,9 @@ struct AcloudMediaHeader:View {
     var localID:String?=nil
     var previewSource:AcloudPreviewSource = .device
     var sourceCaptureDate:Date?=nil
+    var previewAccount:UUID?=nil
+    var previewAsset:UUID?=nil
+    var previewChecksum:String?=nil
     let dateLabel:String
     let date:Date?
     var detail:String?=nil
@@ -163,6 +168,9 @@ struct AcloudMediaHeader:View {
                 if previewSource == .device {
                     AcloudLocalThumbnail(localID:localID,captureDate:$capturedAt).clipShape(RoundedRectangle(cornerRadius:12))
                 }
+                if previewSource == .backupVersion,["image","video"].contains(type),let account=previewAccount,let asset=previewAsset {
+                    AcloudSavedThumbnail(account:account,asset:asset,checksum:previewChecksum).id(account.uuidString+asset.uuidString+(previewChecksum ?? ""))
+                }
                 if type == "video" {Image(systemName:"play.fill").font(.caption2).padding(6).foregroundStyle(.white).background(.black.opacity(0.65),in:Circle()).padding(5)}
             }.frame(width:76,height:76).accessibilityHidden(true)
             VStack(alignment:.leading,spacing:5) {
@@ -170,7 +178,7 @@ struct AcloudMediaHeader:View {
                     .font(.headline).foregroundStyle(.primary)
                 if let taken=sourceCaptureDate ?? (previewSource == .device ? capturedAt:nil) {Text("Taken \(taken.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))").font(.subheadline).foregroundStyle(.secondary)}
                 if previewSource == .backupVersion {
-                    Text("Saved version · no preview yet").font(.caption).foregroundStyle(.secondary)
+                    Text("Saved version").font(.caption).foregroundStyle(.secondary)
                 } else if localID != nil {
                     Text("Current device preview").font(.caption).foregroundStyle(.secondary)
                 }
@@ -178,6 +186,9 @@ struct AcloudMediaHeader:View {
                 else {Text("\(dateLabel) date unavailable").font(.caption).foregroundStyle(.secondary)}
                 if let detail {Text(detail).font(.caption).foregroundStyle(.secondary)}
             }.fixedSize(horizontal:false,vertical:true)
+        }
+        if previewSource == .backupVersion,["image","video"].contains(type),let account=previewAccount,let asset=previewAsset {
+            AcloudSavedPreviewControl(account:account,asset:asset,checksum:previewChecksum).id(account.uuidString+asset.uuidString+(previewChecksum ?? ""))
         }
     }
 }
@@ -257,5 +268,135 @@ struct AcloudTransferProgress:View {
                 }
             }
         }.padding(12).background(AcloudStyle.accent.opacity(0.06),in:RoundedRectangle(cornerRadius:14))
+    }
+}
+
+// Only verified upload bytes or a pinned, integrity-checked download can enter this cache.
+typealias AcloudPreviewStore = VerifiedPreviewCache
+
+struct AcloudPreviewPreparer:ResourcePreparer {
+    let wrapped:any ResourcePreparer
+    let queue:SQLiteBackupQueue
+    let files:ManagedTemporaryFiles
+    func prepare(_ item:BackupItem,policy:BackupPolicy,network:NetworkSnapshot)async throws->PreparedResource {try await wrapped.prepare(item,policy:policy,network:network)}
+    func cleanup(_ item:BackupItem)async throws {
+        // Re-read: the coordinator passes its pre-verification item to cleanup.
+        if let verified=try? await queue.read(item.id),verified.state == .protected,
+           let account=verified.accountID,let asset=verified.assetID,let checksum=verified.expectedChecksum,let size=verified.expectedSizeBytes,
+           size>0,size<=BackupPreviewPolicy.maximumLocalBytes,["image","video"].contains(verified.mediaType) {
+            if let data=try? await AcloudPreviewStore.shared.capture(file:files.url(item.id),account:account,asset:asset,checksum:checksum,size:size,mediaType:verified.mediaType) {
+                await AcloudPreviewRegistry.shared.received(account:account,asset:asset,checksum:checksum,data:data)
+            }
+        }
+        try await wrapped.cleanup(item)
+    }
+}
+
+@MainActor final class AcloudPreviewLoader:ObservableObject {
+    @Published var data:Data?
+    @Published var loading=false
+    @Published var message:String?
+    private static var downloadBusy=false
+    private var activeDownload:FileRestoreDownloader?
+    private var generation=UUID()
+    func invalidate(){generation=UUID();data=nil;loading=false;message=nil;if let activeDownload{Task{await activeDownload.cancel()}};activeDownload=nil}
+    private func connection(account:UUID)async throws->HTTPRestoreAPI {
+        guard BetaReleaseSafety.acceptedConfiguration,let value=Bundle.main.object(forInfoDictionaryKey:"APIBaseURL") as? String,let base=URL(string:value) else{throw RestoreFailure.authorization}
+        let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session")
+        guard UUID(uuidString:try await AuthAPI(baseURL:base,store:tokens).me().id)==account else{throw RestoreFailure.authorization}
+        return try HTTPRestoreAPI(base:base,tokens:tokens,allowLocalHTTP:_isDebugAssertConfiguration())
+    }
+    func load(account:UUID,asset:UUID,checksum:String?,download:Bool=false)async {
+        guard !loading else{return};let epoch=generation;loading=true;defer{if epoch==generation{loading=false}}
+        do {
+            if let checksum,!download {
+                let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:checksum)
+                try Task.checkCancellation();guard epoch==generation else{return};data=cached
+                return
+            }
+            let api=try await connection(account:account)
+            let proof=try await api.evidence(asset)
+            guard proof.id==asset,proof.supported,checksum==nil || checksum==proof.expectedSha256 else{throw RestoreFailure.versionChanged}
+            if let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:proof.expectedSha256) {try Task.checkCancellation();guard epoch==generation else{return};data=cached;return}
+            guard download else{return}
+            guard epoch==generation else{return}
+            guard proof.expectedSize<=BackupPreviewPolicy.maximumDownloadBytes else{message="This original is too large for preview loading. New backups capture a thumbnail on this device.";return}
+            guard let value=Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String,let origin=URL(string:value) else{throw RestoreFailure.authorization}
+            guard !Self.downloadBusy else{message="Another saved preview is loading. Try again when it finishes.";return}
+            Self.downloadBusy=true;defer{Self.downloadBusy=false;activeDownload=nil}
+            let authorization=try await api.authorize(proof)
+            guard authorization.evidence==proof else{throw RestoreFailure.versionChanged}
+            let directory=FileManager.default.temporaryDirectory.appendingPathComponent("Preview-"+UUID().uuidString,isDirectory:true)
+            let files=try RestoreFiles(directory:directory),id=UUID()
+            defer{try? FileManager.default.removeItem(at:directory)}
+            guard epoch==generation else{return}
+            let downloader=try FileRestoreDownloader(origin:origin,allowLocalHTTP:_isDebugAssertConfiguration());activeDownload=downloader
+            try await downloader.download(authorization.authorization,to:files.url(id),expectedSize:proof.expectedSize,progress:{_ in})
+            try files.verify(RestoreItem(accountID:account,libraryID:UUID(),evidence:proof,id:id))
+            guard try await api.recheck(proof)==proof else{throw RestoreFailure.versionChanged}
+            _=try await connection(account:account);try Task.checkCancellation()
+            let preview=try await AcloudPreviewStore.shared.capture(file:files.url(id),account:account,asset:asset,checksum:proof.expectedSha256,size:proof.expectedSize,mediaType:proof.mediaType)
+            try Task.checkCancellation();guard epoch==generation else{return};data=preview;message=nil
+        } catch is CancellationError {return}
+        catch {
+            guard epoch==generation else{return}
+            guard download else{return}
+            if let failure=error as? RestoreFailure {
+                switch failure {
+                case .http(401),.http(403),.authorization,.disabled:message="Preview access is unavailable for this session. Sign in or check test access."
+                case .http(409):message="This saved format cannot load a preview through the current restore access. New backups can capture one locally."
+                case .unsupported:message="A saved thumbnail is not available for this file type or size."
+                case .integrity,.versionChanged:message="The saved file could not be verified. No preview was created."
+                default:message="Preview could not load. Connect to Wi-Fi and retry."
+                }
+            } else {message="Preview could not load. Connect to Wi-Fi and retry."}
+        }
+    }
+}
+
+// Both controls observe the same account/asset-scoped loader within one row.
+private struct AcloudSavedThumbnail:View {
+    let account:UUID,asset:UUID
+    let checksum:String?
+    @ObservedObject private var registry=AcloudPreviewRegistry.shared
+    var body:some View {AcloudPreviewImage(loader:registry.loader(account:account,asset:asset,checksum:checksum))}
+}
+private struct AcloudPreviewImage:View {
+    @ObservedObject var loader:AcloudPreviewLoader
+    var body:some View {
+        if let data=loader.data,let image=UIImage(data:data) {Image(uiImage:image).resizable().scaledToFill().frame(width:76,height:76).clipped().clipShape(RoundedRectangle(cornerRadius:12))}
+    }
+}
+@MainActor final class AcloudPreviewRegistry:ObservableObject {
+    static let shared=AcloudPreviewRegistry()
+    private var loaders:[String:AcloudPreviewLoader]=[:]
+    func loader(account:UUID,asset:UUID,checksum:String?)->AcloudPreviewLoader {
+        let key=account.uuidString+asset.uuidString+(checksum ?? "")
+        if let loader=loaders[key]{return loader}
+        if loaders.count>=256,let oldest=loaders.keys.sorted().first {loaders.removeValue(forKey:oldest)?.invalidate()}
+        let loader=AcloudPreviewLoader();loaders[key]=loader;return loader
+    }
+    func received(account:UUID,asset:UUID,checksum:String,data:Data) {
+        loaders[account.uuidString+asset.uuidString+checksum]?.data=data
+    }
+    func clear(){for loader in loaders.values{loader.invalidate()};loaders=[:]}
+}
+private struct AcloudSavedPreviewControl:View {
+    let account:UUID,asset:UUID
+    let checksum:String?
+    var body:some View {AcloudPreviewControl(loader:AcloudPreviewRegistry.shared.loader(account:account,asset:asset,checksum:checksum),account:account,asset:asset,checksum:checksum)}
+}
+private struct AcloudPreviewControl:View {
+    @ObservedObject var loader:AcloudPreviewLoader
+    let account:UUID,asset:UUID
+    let checksum:String?
+    var body:some View {
+        VStack(alignment:.leading,spacing:4) {
+            if loader.data==nil {
+                if loader.loading {ProgressView("Loading saved preview…").font(.caption)}
+                else {Button("Load saved thumbnail over Wi-Fi"){Task{await loader.load(account:account,asset:asset,checksum:checksum,download:true)}}.font(.caption).buttonStyle(.borderless)}
+                Text(loader.message ?? "Older backups may need the saved original downloaded to create a preview. Nothing is added to Photos.").font(.caption2).foregroundStyle(.secondary)
+            }
+        }.task {await loader.load(account:account,asset:asset,checksum:checksum)}
     }
 }

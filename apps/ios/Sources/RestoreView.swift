@@ -33,6 +33,11 @@ private extension RestoreState {
  @Published var canRestore=false
  @Published var availableBytes:Int64?
  @Published var progress:[UUID:Int]=[:]
+ var previewAccount:UUID? {account}
+ func previewChecksum(_ asset:UUID)->String? {
+  guard let account,BackupQueueModel.shared.previewAccount==account else{return nil}
+  return BackupQueueModel.shared.items.first{$0.state == .protected && $0.assetID==asset}?.expectedChecksum
+ }
  private var scanningAlerts=false
  private var alertsSuspended=true
  private var developmentTestAsset:UUID?
@@ -203,7 +208,7 @@ struct RestoreView:View {
       Button("Clear selection"){model.selected=[]}.disabled(model.busy || model.selected.isEmpty)
      }
      Text("Select several photos or videos, then tap Restore selected to Photos. Up to 10 items per batch.").font(.footnote)
-     Text("Grouped by backup date, newest first. Stored-version previews are not available yet; device edits do not change these saved files.").font(.caption).foregroundStyle(.secondary)
+     Text("Grouped by backup date, newest first. Thumbnails show the saved version. Device edits do not change these backups.").font(.caption).foregroundStyle(.secondary)
      if !model.canRestore{Text("Restore access is currently unavailable for this session. This does not mean your protected backups are missing.").foregroundStyle(.secondary)}
      else if model.assets.isEmpty{Text("No verified backups are available in this page.").foregroundStyle(.secondary)}
      else if model.assets.filter({mediaFilter.includes($0.mediaType)}).isEmpty{Text("No \(mediaFilter.rawValue.lowercased()) in this page.").foregroundStyle(.secondary)}
@@ -211,7 +216,7 @@ struct RestoreView:View {
     ForEach(acloudMediaGroups(model.assets.filter{mediaFilter.includes($0.mediaType)},type:{$0.mediaType},date:{$0.backupDate})) {group in
      Section {ForEach(group.items){asset in
       Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{model.select(asset.id,on:$0)})) {
-       AcloudMediaHeader(type:asset.mediaType,reference:asset.id,previewSource:.backupVersion,dateLabel:"Backed up",date:asset.backupDate,detail:asset.sizeBytes.map{"Verified size · \($0.formatted(.byteCount(style:.file)))"} ?? "Verified backup · size unavailable")
+       AcloudMediaHeader(type:asset.mediaType,reference:asset.id,previewSource:.backupVersion,previewAccount:model.previewAccount,previewAsset:asset.id,previewChecksum:model.previewChecksum(asset.id),dateLabel:"Backed up",date:asset.backupDate,detail:asset.sizeBytes.map{"Verified size · \($0.formatted(.byteCount(style:.file)))"} ?? "Verified backup · size unavailable")
       }.padding(.vertical,8).disabled(model.busy || !model.canRestore)
      }} header:{AcloudMediaGroupTitle(title:group.title+" · verified backups",date:group.day)}
     }
@@ -222,7 +227,7 @@ struct RestoreView:View {
       Text("Live Photos require both resources. Edited assets require an explicit original or rendered choice; adjustment recipes cannot be reapplied exactly.").font(.footnote)
       ForEach(model.assets.filter{mediaFilter.includes($0.mediaType)}){asset in
        VStack(alignment:.leading,spacing:8) {
-        AcloudMediaHeader(type:asset.mediaType,reference:asset.id,previewSource:.backupVersion,dateLabel:"Backed up",date:asset.backupDate)
+        AcloudMediaHeader(type:asset.mediaType,reference:asset.id,previewSource:.backupVersion,previewAccount:model.previewAccount,previewAsset:asset.id,previewChecksum:model.previewChecksum(asset.id),dateLabel:"Backed up",date:asset.backupDate)
         ViewThatFits(in:.horizontal){HStack{variantActions(asset.id)};VStack(alignment:.leading){variantActions(asset.id)}}.buttonStyle(.bordered).disabled(!model.canRestore)
        }.padding(.vertical,8)
       }
@@ -247,7 +252,7 @@ struct RestoreView:View {
  }
  private func restoreRow(_ item:RestoreItem)->some View {
   VStack(alignment:.leading,spacing:12) {
-   AcloudMediaHeader(type:item.evidence.mediaType,reference:item.evidence.id,previewSource:.backupVersion,dateLabel:"Restore requested",date:item.createdAt,detail:"Size · \(item.evidence.expectedSize.formatted(.byteCount(style:.file)))")
+   AcloudMediaHeader(type:item.evidence.mediaType,reference:item.evidence.id,previewSource:.backupVersion,previewAccount:model.previewAccount,previewAsset:item.evidence.id,previewChecksum:item.evidence.expectedSha256,dateLabel:"Restore requested",date:item.createdAt,detail:"Size · \(item.evidence.expectedSize.formatted(.byteCount(style:.file)))")
    Label(item.state.displayTitle,systemImage:item.state == .restored ? "checkmark.circle.fill":"arrow.down.circle")
     .font(.subheadline.weight(.semibold)).foregroundStyle(item.state == .restored ? AcloudStyle.accent:Color.primary)
    if item.state != .cancelled {

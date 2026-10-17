@@ -55,3 +55,89 @@ public struct GeneratedResourcePreparer: ResourcePreparer {
 }
 
 #endif
+
+// Private derived-preview keys bind both owner and immutable verified bytes.
+public enum BackupPreviewPolicy {
+ public static let maximumLocalBytes=256*1024*1024
+ public static let maximumDownloadBytes=32*1024*1024
+ public static func key(account:UUID,asset:UUID,checksum:String)->String? {
+  guard checksum.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil else{return nil}
+  return account.uuidString.lowercased()+"/"+asset.uuidString.lowercased()+"-"+checksum+".jpg"
+ }
+ public static func mayCapture(protected:Bool,size:Int,expectedSize:Int?,checksum:String,expectedChecksum:String?)->Bool {
+  protected && size>0 && size<=maximumLocalBytes && size==expectedSize && checksum==expectedChecksum && checksum.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil
+ }
+}
+
+#if canImport(ImageIO) && canImport(AVFoundation)
+import ImageIO
+import AVFoundation
+public actor VerifiedPreviewCache {
+    public static let shared=VerifiedPreviewCache()
+    private let root:URL
+    public init(directory:URL?=nil){root=(directory ?? FileManager.default.urls(for:.cachesDirectory,in:.userDomainMask)[0].appendingPathComponent("SavedVersionPreviews",isDirectory:true)).standardizedFileURL.resolvingSymlinksInPath()}
+    private func file(account:UUID,asset:UUID,checksum:String)throws->URL {
+        guard let key=BackupPreviewPolicy.key(account:account,asset:asset,checksum:checksum) else{throw BackupFailure.sourceChanged}
+        let url=root.appendingPathComponent(key),directory=url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        #if os(iOS)
+        try FileManager.default.setAttributes([.protectionKey:FileProtectionType.complete],ofItemAtPath:directory.path)
+        #endif
+        var excluded=root;var values=URLResourceValues();values.isExcludedFromBackup=true;try excluded.setResourceValues(values)
+        return url
+    }
+    public func cached(account:UUID,asset:UUID,checksum:String)throws->Data? {
+        let url=try file(account:account,asset:asset,checksum:checksum)
+        guard FileManager.default.fileExists(atPath:url.path) else{return nil}
+        guard (try url.resourceValues(forKeys:[.fileSizeKey,.isSymbolicLinkKey])).isSymbolicLink != true,
+              let size=try url.resourceValues(forKeys:[.fileSizeKey]).fileSize,size>0,size<=256*1024 else{return nil}
+        return try Data(contentsOf:url)
+    }
+    public func capture(file source:URL,account:UUID,asset:UUID,checksum:String,size:Int,mediaType:String)async throws->Data {
+        guard size>0,size<=BackupPreviewPolicy.maximumLocalBytes else{throw BackupFailure.unsupported}
+        guard try source.resourceValues(forKeys:[.fileSizeKey,.isSymbolicLinkKey]).isSymbolicLink != true,try source.resourceValues(forKeys:[.fileSizeKey]).fileSize==size else{throw BackupFailure.sourceChanged}
+        let integrity=try StreamingIntegrity.inspect(source)
+        guard BackupPreviewPolicy.mayCapture(protected:true,size:integrity.sizeBytes,expectedSize:size,checksum:integrity.checksum,expectedChecksum:checksum) else{throw BackupFailure.sourceChanged}
+        let image:CGImage
+        if mediaType=="image" {
+            guard let input=CGImageSourceCreateWithURL(source as CFURL,[kCGImageSourceShouldCache:false] as CFDictionary),
+                  let thumbnail=CGImageSourceCreateThumbnailAtIndex(input,0,[kCGImageSourceCreateThumbnailFromImageAlways:true,kCGImageSourceThumbnailMaxPixelSize:240,kCGImageSourceCreateThumbnailWithTransform:true] as CFDictionary) else{throw BackupFailure.unsupported}
+            image=thumbnail
+        } else if mediaType=="video" {
+            // Give AVFoundation a recognizable extension without modifying the verified source.
+            let link=source.deletingLastPathComponent().appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
+            try FileManager.default.linkItem(at:source,to:link);defer{try? FileManager.default.removeItem(at:link)}
+            let generator=AVAssetImageGenerator(asset:AVURLAsset(url:link));generator.appliesPreferredTrackTransform=true;generator.maximumSize=CGSize(width:240,height:240)
+            image=try await generator.image(at:.zero).image
+        } else {throw BackupFailure.unsupported}
+        guard let output=CFDataCreateMutable(nil,0),let destination=CGImageDestinationCreateWithData(output,"public.jpeg" as CFString,1,nil) else{throw BackupFailure.unsupported}
+        CGImageDestinationAddImage(destination,image,[kCGImageDestinationLossyCompressionQuality:0.75] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else{throw BackupFailure.unsupported}
+        let data=output as Data
+        guard data.count<=256*1024 else{throw BackupFailure.unsupported}
+        try Task.checkCancellation()
+        let url=try file(account:account,asset:asset,checksum:checksum)
+        #if os(iOS)
+        try data.write(to:url,options:[.atomic,.completeFileProtection])
+        #else
+        try data.write(to:url,options:.atomic)
+        #endif
+        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+        trimCache()
+        return data
+    }
+    // Bound disposable derived data; evicting it never affects backups or device originals.
+    private func trimCache() {
+        let keys:Set<URLResourceKey>=[.isRegularFileKey,.contentModificationDateKey,.fileSizeKey]
+        if let enumerator=FileManager.default.enumerator(at:root,includingPropertiesForKeys:Array(keys)) {
+            var files:[(URL,Date,Int)]=[]
+            for case let candidate as URL in enumerator {
+                if let values=try? candidate.resourceValues(forKeys:keys),values.isRegularFile==true {files.append((candidate,values.contentModificationDate ?? .distantPast,values.fileSize ?? 0))}
+            }
+            var bytes=files.reduce(0){$0+$1.2}
+            for old in files.sorted(by:{$0.1<$1.1}) where bytes>32*1024*1024 {try? FileManager.default.removeItem(at:old.0);bytes-=old.2}
+        }
+    }
+}
+
+#endif
