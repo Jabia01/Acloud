@@ -221,7 +221,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    guard FileManager.default.createFile(atPath:url.path,contents:nil,attributes:[.posixPermissions:0o600]) else{throw BackupFailure.storage}
    let handle=try FileHandle(forWritingTo:url);defer{try? handle.close()}
    let chunk=Data(repeating:0x65,count:64*1024);for _ in 0..<320{try handle.write(contentsOf:chunk)};try handle.synchronize()
-   _=try await queue.enqueue(BackupItem(libraryID:library,localAssetIdentifier:id.uuidString,mediaType:"test"))
+   _=try await queue.enqueue(BackupItem(libraryID:library,localAssetIdentifier:id.uuidString,mediaType:"test"));self.startWorker()
   }
   #endif
  }
@@ -302,6 +302,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
     }catch{return .failed}
    }) else{throw BackupFailure.authorization}
    self.selectionNotice=summary.message
+   self.startWorker()
    #if DEBUG
    if summary.unsupported>0{self.selectionNotice=summary.message+" Choose ordinary photos, short unedited videos, or a complete Live Photo/edited-photo test set when experimental backup is available. RAW, edited videos and unknown formats remain excluded."}
    #endif
@@ -333,11 +334,11 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   }
  }
  func pauseAll() async{await action{try await self.engine?.pauseAll()}}
- func resumeAll() async{await action{try await self.engine?.resumeAll()}}
- func retryFailed() async{await action{try await self.engine?.retryAllFailed()}}
- func retry(_ id:UUID) async{await action{try await self.engine?.retryFailed(id)}}
+ func resumeAll() async{await action{try await self.engine?.resumeAll();self.startWorker()}}
+ func retryFailed() async{await action{try await self.engine?.retryAllFailed();self.startWorker()}}
+ func retry(_ id:UUID) async{await action{try await self.engine?.retryFailed(id);self.startWorker()}}
  func pause(_ id:UUID) async{await action{try await self.engine?.pause(id)}}
- func resume(_ id:UUID) async{await action{try await self.engine?.resume(id)}}
+ func resume(_ id:UUID) async{await action{try await self.engine?.resume(id);self.startWorker()}}
  func restart(_ id:UUID)async {
   if let item=items.first(where:{$0.id==id}),let binding=item.mediaResourceBinding {
    do{try await connect();guard let engine else{throw BackupFailure.missing};let settled=try await engine.settleCancellation(id)
@@ -347,14 +348,27 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    return
   }
   transferAnchor=nil
-  await action{guard let engine=self.engine,let queue=self.queue else{throw BackupFailure.missing};let fresh=try await engine.restartCancelled(id);let current=try await queue.read(fresh);self.selectionNotice=current?.state == .protected ? "This item is already verified and protected." : current?.state == .queued ? "Backup queued again. The cancelled attempt remains in your history." : "This item has a newer attempt. Open the latest transfer to continue."}
+  await action{guard let engine=self.engine,let queue=self.queue else{throw BackupFailure.missing};let fresh=try await engine.restartCancelled(id);let current=try await queue.read(fresh);self.selectionNotice=current?.state == .protected ? "This item is already verified and protected." : current?.state == .queued ? "Backup queued again. The cancelled attempt remains in your history." : "This item has a newer attempt. Open the latest transfer to continue.";self.startWorker()}
   await tick()
  }
  func cancel(_ id:UUID) async{await action{try await self.engine?.cancel(id)}}
+ private var workerRequested=false
+ private func startWorker(requestAnotherPass:Bool=true) {
+  guard let engine else{return}
+  if worker != nil{if requestAnotherPass{workerRequested=true};return}
+  // Acquire execution time at the explicit action, before metadata refreshes.
+  let allowance=BackupBackgroundTime();allowance.begin()
+  worker=Task{
+   defer{allowance.end();self.worker=nil}
+   repeat {
+    self.workerRequested=false
+    try? await engine.runDue()
+    await self.refresh()
+   }while self.workerRequested && !Task.isCancelled
+  }
+ }
  func tick() async {
-  do{try await connect();if worker==nil,let engine{worker=Task{
-   let allowance=BackupBackgroundTime();allowance.begin();defer{allowance.end()}
-   defer{self.worker=nil};try? await engine.runDue();await self.refresh()}};await refresh()}catch{message="Waiting for account or API access."}
+  do{try await connect();startWorker(requestAnotherPass:false);await refresh()}catch{message="Waiting for account or API access."}
  }
  func stopForSignOut() async throws{AcloudPreviewRegistry.shared.clear();alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;complexBackupTestAvailable=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
  func handleBackground(completion:@escaping @Sendable()->Void) async {
@@ -516,7 +530,7 @@ struct BackupQueueView:View {
   }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(filter:selection == .video ? .videos:selection == .photo ? .images:.any(of:[.images,.videos])){result in pickerSelection=nil;guard let result else{return};transferFilter = .all;queueFilter = .all;browserMode="transfers";Task{await model.enqueueSelected(result.identifiers,unavailableCount:result.unavailableCount)}}.id(selection.id)}
    .sheet(item:$galleryViewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
    .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
-   .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
+   .task{await model.refresh()}
  }
  private func previewResource(_ manifest:MediaManifest)->ManifestResource? {
   let verified=manifest.required.filter{$0.status=="PROTECTED"}

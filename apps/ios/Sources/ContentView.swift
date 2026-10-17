@@ -30,6 +30,13 @@ struct ContentView: View {
         }
         .tint(AcloudStyle.accent)
         .task { await checkHealth() }
+        .task {
+            // Queue recovery belongs to the app, independent of the selected tab.
+            while !Task.isCancelled {
+                await BackupQueueModel.shared.tick()
+                try? await Task.sleep(for:.seconds(5))
+            }
+        }
     }
 
     @MainActor

@@ -28,3 +28,7 @@ References: [Apple background URLSession guidance](https://developer.apple.com/d
 ## Connection-drop recovery
 
 A background multipart step that receives `URLError.networkConnectionLost` (`NETWORK_-1005`) gets up to two bounded recovery passes within the current worker, rather than depending only on the foreground polling timer. After a short cancellation-aware delay, storage part listing is checked first. An accepted part is retained; a missing part receives fresh authorization before retransmission. User pause/cancel and network policy are rechecked. Persistent failures use the existing durable retry/backoff state; this is not a promise of continuous execution after force-quit or while iOS withholds execution. Server verification remains required for Protected and completion alerts.
+
+## Starting queued work
+
+Explicit selection, retry, resume and restart request queue execution immediately, before history/manifest refreshes. Requests arriving while a worker is running trigger another pass after its current work and refresh finish. Periodic recovery scheduling lives at the app tab-container level, so changing tabs does not remove it. The timer is only a foreground fallback; it is not an iOS background-execution entitlement. Preparing originals and handing a file to the background session must still occur before system suspension. Physical locked-screen completion remains an acceptance check, not a conclusion from successful builds.
