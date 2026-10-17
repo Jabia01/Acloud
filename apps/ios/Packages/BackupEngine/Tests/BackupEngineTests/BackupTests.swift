@@ -30,15 +30,16 @@ private actor TestAPI:MultipartAPI {
  func forceProtected(size:Int){self.size=size;phase = .protected;completed=true}
 }
 private actor TestTransport:PartTransport {
+ nonisolated let keepsTransfersDuringConnectionLoss:Bool
  var backgroundIDs:Set<UUID>=[];var cancelledIDs:Set<UUID>=[]
  func background(_ id:UUID){backgroundIDs.insert(id)}
  func activeItemIDs()async->Set<UUID>{backgroundIDs}
- let api:TestAPI;var numbers:[Int]=[];var failNumber:Int?;var loseResponse=false;var failAuthorization=false
- init(api:TestAPI){self.api=api}
- func configure(fail:Int?,lose:Bool=false,expired:Bool=false){failNumber=fail;loseResponse=lose;failAuthorization=expired}
+ let api:TestAPI;var numbers:[Int]=[];var failNumber:Int?;var loseResponse=false;var failAuthorization=false;var failuresRemaining=1
+ init(api:TestAPI,background:Bool=false){self.api=api;keepsTransfersDuringConnectionLoss=background}
+ func configure(fail:Int?,lose:Bool=false,expired:Bool=false,times:Int=1){failNumber=fail;loseResponse=lose;failAuthorization=expired;failuresRemaining=times}
  func upload(item:UUID,number:Int,resource:PreparedResource,authorization:UploadAuthorization,policy:BackupPolicy) async throws {
   numbers.append(number)
-  if failNumber==number {failNumber=nil;if loseResponse{await api.accept(number,size:resource.sizeBytes)};throw failAuthorization ? BackupFailure.authorization : URLError(.networkConnectionLost)}
+  if failNumber==number {failuresRemaining-=1;if failuresRemaining==0{failNumber=nil};if loseResponse{await api.accept(number,size:resource.sizeBytes)};throw failAuthorization ? BackupFailure.authorization : URLError(.networkConnectionLost)}
   await api.accept(number,size:resource.sizeBytes)
  }
  func cancel(item:UUID) {backgroundIDs.remove(item);cancelledIDs.insert(item)}
@@ -86,6 +87,41 @@ final class BackupEngineTests:XCTestCase {
   let verified=await events.count,state=try await q.read(item.id)?.state
   XCTAssertEqual(verified,1);XCTAssertEqual(state,.protected)
   try await e.reconcileStartup();let afterRelaunch=await events.count;XCTAssertEqual(afterRelaunch,1)
+ }
+ func testBackgroundConnectionLossRecoversWithoutForegroundTimer()async throws {
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=TestTransport(api:api,background:true)
+  await transport.configure(fail:1)
+  let engine=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await engine.setNetwork(NetworkSnapshot());try await engine.run(item.id)
+  let state=try await q.read(item.id)?.state,calls=await transport.numbers,auths=await api.authorizations
+  XCTAssertEqual(state,.protected);XCTAssertEqual(calls,[1,1]);XCTAssertEqual(auths,2)
+ }
+ func testRepeatedBackgroundDropsUseBoundedRecoveryThenDurableRetry()async throws {
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=TestTransport(api:api,background:true)
+  await transport.configure(fail:1,times:10)
+  let engine=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await engine.setNetwork(NetworkSnapshot());do{try await engine.run(item.id);XCTFail()}catch{}
+  let result=try await q.read(item.id),calls=await transport.numbers
+  XCTAssertEqual(result?.state,.failedRetryable);XCTAssertEqual(result?.lastErrorCode,"NETWORK_-1005")
+  XCTAssertNotNil(result?.nextRetryAt);XCTAssertEqual(calls,[1,1,1])
+ }
+ func testUserPauseWinsDuringBackgroundDropRecovery()async throws {
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=TestTransport(api:api,background:true)
+  await transport.configure(fail:1,times:10)
+  let engine=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await engine.setNetwork(NetworkSnapshot());let running=Task{try await engine.run(item.id)}
+  for _ in 0..<200{if !(await transport.numbers).isEmpty{break};try await Task.sleep(for:.milliseconds(10))}
+  try await engine.pause(item.id);_=try? await running.value
+  let state=try await q.read(item.id)?.state,calls=await transport.numbers
+  XCTAssertEqual(state,.paused);XCTAssertEqual(calls,[1])
+ }
+ func testBackgroundLostResponseDoesNotResendAcceptedPart()async throws {
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=TestTransport(api:api,background:true)
+  await transport.configure(fail:1,lose:true)
+  let engine=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await engine.setNetwork(NetworkSnapshot());try await engine.run(item.id)
+  let state=try await q.read(item.id)?.state,calls=await transport.numbers
+  XCTAssertEqual(state,.protected);XCTAssertEqual(calls,[1])
  }
  func testBackgroundDaemonRetainsUploadDuringConnectionLoss()async throws{
   let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=HoldingBackgroundTransport(api:api)

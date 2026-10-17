@@ -102,11 +102,7 @@ public actor BackupCoordinator {
      let part=try files.part(resource,id:id,number:number,size:size)
      do {
       // Authorization is always fresh and exists only in memory / system transfer daemon.
-      let auth=try await api.authorize(session.id,number:number,size:part.sizeBytes,checksum:part.checksum)
-      _=try await current(id)
-      try await transport.upload(item:id,number:number,resource:part,authorization:auth,policy:policy)
-      _=try await current(id)
-      listing=try await api.parts(session.id) // Storage ListParts is authoritative after response loss.
+      listing=try await uploadPart(id,sessionID:session.id,number:number,part:part)
       try await queue.replaceParts(id,parts:listing.parts)
       item=try await current(id);item.bytesUploaded=listing.parts.reduce(0){$0+$1.sizeBytes};item=try await queue.save(item)
       try files.remove(part.fileURL)
@@ -133,6 +129,34 @@ public actor BackupCoordinator {
     else { latest.lastErrorCode=canRetry ? "TRANSFER_RETRY" : "TRANSFER_REQUIRES_ACTION" }
    }
    _=try await queue.save(latest);try await preparer.cleanup(latest);throw error
+  }
+ }
+ // A background callback is a limited execution opportunity. Recover a dropped
+ // connection here instead of relying solely on a foreground retry timer.
+ private func uploadPart(_ id:UUID,sessionID:UUID,number:Int,part:PreparedResource)async throws->PartListing {
+  var recoveries=0
+  while true {
+   let item=try await current(id)
+   guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");throw CancellationError()}
+   do {
+    let auth=try await api.authorize(sessionID,number:number,size:part.sizeBytes,checksum:part.checksum)
+    _=try await current(id)
+    try await transport.upload(item:id,number:number,resource:part,authorization:auth,policy:policy)
+    _=try await current(id)
+    return try await api.parts(sessionID)
+   } catch {
+    guard transport.keepsTransfersDuringConnectionLoss,
+          let failure=error as? URLError,failure.code == .networkConnectionLost,
+          recoveries<2 else{throw error}
+    recoveries+=1
+    try await Task.sleep(for:.seconds(recoveries))
+    _=try await current(id)
+    // A lost response may mean storage accepted the bytes. Never blindly resend.
+    let listing=try await api.parts(sessionID)
+    _=try await current(id)
+    if listing.completed || listing.parts.contains(where:{$0.partNumber==number}){return listing}
+    // Missing parts receive a new short-lived authorization on the next pass.
+   }
   }
  }
  private func verify(_ id:UUID,sessionID:UUID) async throws {

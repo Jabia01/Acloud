@@ -24,3 +24,7 @@ Pending physical acceptance for this update:
 Physical receipt is not established by compilation or unit tests. Distribution signing/TestFlight admission remains separate.
 
 References: [Apple background URLSession guidance](https://developer.apple.com/documentation/foundation/downloading-files-in-the-background), [background execution time](https://developer.apple.com/documentation/uikit/extending-your-app-s-background-execution-time), [device-only first-unlock Keychain access](https://developer.apple.com/documentation/security/ksecattraccessibleafterfirstunlockthisdeviceonly).
+
+## Connection-drop recovery
+
+A background multipart step that receives `URLError.networkConnectionLost` (`NETWORK_-1005`) gets up to two bounded recovery passes within the current worker, rather than depending only on the foreground polling timer. After a short cancellation-aware delay, storage part listing is checked first. An accepted part is retained; a missing part receives fresh authorization before retransmission. User pause/cancel and network policy are rechecked. Persistent failures use the existing durable retry/backoff state; this is not a promise of continuous execution after force-quit or while iOS withholds execution. Server verification remains required for Protected and completion alerts.
