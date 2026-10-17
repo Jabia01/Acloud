@@ -210,3 +210,17 @@ final class DiscoveryTests: XCTestCase {
         let summary = try await store.summary(); XCTAssertEqual(summary.observedAssets,0)
     }
 }
+
+final class DiscoveryRefreshPolicyTests:XCTestCase {
+    func testUnchangedAccessRetainsVisibleIDs(){
+        XCTAssertEqual(DiscoveryRefreshPolicy.retainedIDs(authorization:.authorized,visible:["one","two"],accessible:["one","two","three"]),["one","two"])
+    }
+    func testLimitedMembershipRemovalImmediatelyDropsHiddenItems(){
+        XCTAssertEqual(DiscoveryRefreshPolicy.retainedIDs(authorization:.limited,visible:["one","two"],accessible:["two"]),["two"])
+    }
+    func testRevokedAccessNeverRetainsItems(){
+        for access in [LibraryAuthorization.denied,.restricted,.notDetermined]{
+            XCTAssertTrue(DiscoveryRefreshPolicy.retainedIDs(authorization:access,visible:["one"],accessible:["one"]).isEmpty)
+        }
+    }
+}

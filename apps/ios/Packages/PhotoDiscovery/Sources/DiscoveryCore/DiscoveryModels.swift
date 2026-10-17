@@ -85,3 +85,10 @@ public enum OriginalResourceSizePolicy {
         return total
     }
 }
+
+// Retained UI observations must never outlive Photos access or visible membership.
+public enum DiscoveryRefreshPolicy {
+    public static func retainedIDs(authorization:LibraryAuthorization,visible:Set<String>,accessible:Set<String>)->Set<String> {
+        authorization.canRead ? visible.intersection(accessible):[]
+    }
+}

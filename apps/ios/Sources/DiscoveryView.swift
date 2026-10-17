@@ -24,10 +24,10 @@ import AVKit
     func sortGallery(_ order:AcloudGalleryOrder){galleryOrder=order;Task{await reloadGallery()}}
     private func reloadGallery()async {
         galleryGeneration=UUID();let epoch=galleryGeneration
-        gallery=[];galleryTotal=0;galleryLoading=false
-        guard authorization.canRead else{return}
+        guard authorization.canRead else{gallery=[];galleryTotal=0;galleryLoading=false;return}
+        let retainedCount=max(200,gallery.count)
         galleryLoading=true;defer{if galleryGeneration==epoch{galleryLoading=false}}
-        let page=await galleryStore.page(order:galleryOrder,offset:0,reload:true)
+        let page=await galleryStore.page(order:galleryOrder,offset:0,reload:true,limit:retainedCount)
         guard galleryGeneration==epoch,authorization.canRead else{return}
         gallery=page.items;galleryTotal=page.total
     }
@@ -49,7 +49,7 @@ import AVKit
     func activate() async {
         active = true
         // Browsing must not depend on the optional scan database opening successfully.
-        await refresh()
+        await refresh(libraryChanged:false)
         do {
             if !initialized {
                 // Opening/migrating SQLite is off the main actor.
@@ -76,18 +76,39 @@ import AVKit
         authorization = await library.requestAccess()
         await refresh()
     }
-    func refresh() async {
-        // Clear counts immediately when returning from Settings/picker/change events.
-        summary = nil; progress = nil;galleryGeneration=UUID();gallery=[];galleryTotal=0;galleryLoading=false
-        authorization = await library.authorization()
+    func refresh(libraryChanged:Bool=true) async {
+        // Revalidate visible membership synchronously before retaining device content.
+        // Limited-access membership can change without changing the permission enum.
+        let previous=authorization
+        let accessStatus=PHPhotoLibrary.authorizationStatus(for:.readWrite)
+        switch accessStatus {
+        case .authorized:authorization = .authorized
+        case .limited:authorization = .limited
+        case .denied:authorization = .denied
+        case .notDetermined:authorization = .notDetermined
+        default:authorization = .restricted
+        }
+        let visibleIDs=Set(gallery.map(\.id))
+        let accessible: Set<String>
+        if authorization.canRead,!visibleIDs.isEmpty {
+            let fetch=PHAsset.fetchAssets(withLocalIdentifiers:Array(visibleIDs),options:nil)
+            var ids=Set<String>();fetch.enumerateObjects{asset,_,_ in ids.insert(asset.localIdentifier)}
+            accessible=ids
+        }else{accessible=[]}
+        let retained=DiscoveryRefreshPolicy.retainedIDs(authorization:authorization,visible:visibleIDs,accessible:accessible)
+        gallery.removeAll{!retained.contains($0.id)}
+        let membershipChanged=retained != visibleIDs
+        let changed=libraryChanged || previous != authorization || membershipChanged
+        if changed || !authorization.canRead{summary=nil;progress=nil}
+        if !authorization.canRead{galleryTotal=0}
         await reloadGallery()
-        await library.invalidateSnapshots()
-        pendingRescan = active && authorization.canRead
+        if changed{await library.invalidateSnapshots()}
+        pendingRescan = active && authorization.canRead && (changed || summary == nil)
         if let scanTask { scanTask.cancel(); return }
         if pendingRescan { start() }
-        else {
+        else if !authorization.canRead {
             try? await scanner?.invalidateAccess()
-            status = authorization.canRead ? "Not scanned" : "Photo access unavailable"
+            status = "Photo access unavailable"
         }
     }
     func start() {
@@ -210,6 +231,10 @@ struct DiscoveryView: View {
         .onChange(of:order){_,value in model.sortGallery(value)}
          .onChange(of:model.galleryLoading){_,loading in if !loading{reconcileSelection()}}
         .onChange(of:model.authorization){_,access in if !access.canRead{selected=[];viewer=nil}}
+        .onChange(of:model.gallery.map(\.id)){_,ids in
+            guard let viewer else{return}
+            if !Set(viewer.items.map(\.id)).isSubset(of:Set(ids)){self.viewer=nil}
+        }
         .onChange(of:scenePhase){_,phase in if phase == .active{Task{await model.activate()}}else{model.deactivate()}}
         .sheet(isPresented:$managingAccess,onDismiss:{Task{await model.refresh()}}){LimitedAccessPicker{managingAccess=false}}
         .sheet(item:$viewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
@@ -452,7 +477,7 @@ private actor AcloudDeviceGalleryStore {
         var allowed=Set<String>();result.enumerateObjects{asset,_,_ in allowed.insert(asset.localIdentifier)}
         return allowed
     }
-    func page(order:AcloudGalleryOrder,offset:Int,reload:Bool)->(items:[AcloudGalleryEntry],total:Int) {
+    func page(order:AcloudGalleryOrder,offset:Int,reload:Bool,limit:Int=200)->(items:[AcloudGalleryEntry],total:Int) {
         let access=PHPhotoLibrary.authorizationStatus(for:.readWrite)
         guard access == .authorized || access == .limited else{result=nil;return([],0)}
         if reload || result==nil || currentOrder != order {
@@ -461,7 +486,7 @@ private actor AcloudDeviceGalleryStore {
             result=PHAsset.fetchAssets(with:options);currentOrder=order
         }
         guard let result,offset>=0,offset<result.count else{return([],result?.count ?? 0)}
-        let items=(offset..<min(offset+200,result.count)).map {index in
+        let items=(offset..<min(offset+max(200,limit),result.count)).map {index in
             let asset=result.object(at:index)
             return AcloudGalleryEntry(id:asset.localIdentifier,type:asset.mediaType == .video ? "video":"image",date:asset.creationDate,duration:asset.mediaType == .video ? asset.duration:nil,live:asset.mediaSubtypes.contains(.photoLive),localID:asset.localIdentifier)
         }

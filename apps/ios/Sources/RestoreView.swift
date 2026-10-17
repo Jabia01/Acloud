@@ -42,6 +42,8 @@ private extension RestoreState {
  private var alertsSuspended=true
  private var developmentTestAsset:UUID?
  private var ownerTestAssets:Set<UUID>?
+ private var inventoryCursor:String?
+ private var inventoryGeneration=UUID()
  private var nextCursor:String?,queueCursor:UUID?,queueAnchor:UUID?,account:UUID?,device:UUID?,library:UUID?
  @Published var showingLaterQueuePage=false
  private var worker:Task<Void,Never>?
@@ -69,14 +71,14 @@ private extension RestoreState {
   await invalidate();let root=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RestoreQueue").appendingPathComponent(account.uuidString).appendingPathComponent(device.uuidString),files=try RestoreFiles(directory:root.appendingPathComponent("temporary")),queue=try RestoreQueue(url:root.appendingPathComponent("restore.sqlite"));let key="restore_library_"+account.uuidString+"_"+device.uuidString,library=UserDefaults.standard.string(forKey:key).flatMap(UUID.init(uuidString:)) ?? UUID();UserDefaults.standard.set(library.uuidString,forKey:key)
   guard let storageValue=Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String,let origin=URL(string:storageValue) else{throw RestoreFailure.authorization};let api=try HTTPRestoreAPI(base:base,tokens:store,allowLocalHTTP:_isDebugAssertConfiguration()),downloader=try FileRestoreDownloader(origin:origin,allowLocalHTTP:_isDebugAssertConfiguration()),coordinator=RestoreCoordinator(queue:queue,files:files,api:api,downloader:downloader,photos:PhotoKitRestorer());let compoundQueue=try CompoundRestoreQueue(url:root.appendingPathComponent("compound.sqlite")),compoundCoordinator=CompoundRestoreCoordinator(queue:compoundQueue,files:files,api:api,downloader:downloader,photos:CompoundPhotoKitRestorer());self.compoundQueue=compoundQueue;self.compoundCoordinator=compoundCoordinator;try await compoundCoordinator.activate(account:account,library:library);self.account=account;self.device=device;self.library=library;self.api=api;self.queue=queue;self.files=files;self.coordinator=coordinator;try await coordinator.activate(account:account,library:library);availableBytes=try? SystemDeviceCapacity().available(at:files.directory);canRestore=await restoreAllowed(auth);alertsSuspended=false;await observeTransferAlerts()
  }
- func invalidate()async{alertsSuspended=true;worker?.cancel();await coordinator?.deactivate();await compoundCoordinator?.deactivate();await worker?.value;worker=nil;coordinator=nil;compoundCoordinator=nil;compoundQueue=nil;compounds=[];api=nil;queue=nil;files=nil;account=nil;device=nil;library=nil;assets=[];items=[];selected=[];progress=[:];nextCursor=nil;queueCursor=nil;queueAnchor=nil;showingLaterQueuePage=false;canRestore=false}
- func loadAssets(next:Bool=false)async{do{try await connect();guard let api else{return};let page=try await api.inventory(cursor:next ? nextCursor:nil);assets=page.items;
+ func invalidate()async{alertsSuspended=true;worker?.cancel();await coordinator?.deactivate();await compoundCoordinator?.deactivate();await worker?.value;worker=nil;coordinator=nil;compoundCoordinator=nil;compoundQueue=nil;compounds=[];api=nil;queue=nil;files=nil;account=nil;device=nil;library=nil;assets=[];items=[];selected=[];progress=[:];nextCursor=nil;queueCursor=nil;queueAnchor=nil;showingLaterQueuePage=false;canRestore=false;inventoryCursor=nil;inventoryGeneration=UUID()}
+ func loadAssets(next:Bool=false,refreshCurrent:Bool=false)async{do{try await connect();guard let api else{return};let requestedAccount=account,requestedDevice=device;let cursor=next ? nextCursor:refreshCurrent ? inventoryCursor:nil;let generation=UUID();inventoryGeneration=generation;let page=try await api.inventory(cursor:cursor);guard inventoryGeneration==generation,account==requestedAccount,device==requestedDevice else{return};inventoryCursor=cursor;assets=page.items;
  #if DEBUG
  assets=assets.filter{(ownerTestAssets?.contains($0.id) ?? ($0.id==developmentTestAsset)) && ["image","video"].contains($0.mediaType)};nextCursor=page.nextCursor
  #else
  nextCursor=page.nextCursor
  #endif
-selected=[];message=canRestore ? (ownerTestAssets != nil ? "Private staging test: select up to 10 eligible photos or videos. This creates a new Photos copy; keep originals." : "Select protected versions explicitly. Restoring creates new Photos items."):"Restore access is not currently enabled for this session. Existing cloud backups stay protected."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
+if next{selected=[]}else{selected.formIntersection(Set(assets.map(\.id)))};message=canRestore ? (ownerTestAssets != nil ? "Private staging test: select up to 10 eligible photos or videos. This creates a new Photos copy; keep originals." : "Select protected versions explicitly. Restoring creates new Photos items."):"Restore access is not currently enabled for this session. Existing cloud backups stay protected."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
  var hasNextAssets:Bool{nextCursor != nil}
  func refresh(next:Bool=false)async{do{try await connect();if let queue,let account,let library{if next{queueAnchor=queueCursor};let requestedAnchor=queueAnchor;let page=try await queue.recent(account:account,library:library,after:requestedAnchor,limit:100);guard queueAnchor==requestedAnchor else{return};items=page;showingLaterQueuePage=queueAnchor != nil;queueCursor=items.last?.id;if let compoundQueue{compounds=try await compoundQueue.page(account:account,library:library,limit:100)}};progress=await coordinator?.progressSnapshot() ?? [:];await observeTransferAlerts()}catch{message="Restore is paused. Your queue is retained."}}
  private func observeTransferAlerts() async {
@@ -285,7 +287,7 @@ struct RestoreView:View {
     }
   }.confirmationDialog("Create another Photos copy?",isPresented:$confirmAnother,titleVisibility:.visible){Button("Restore another copy"){Task{await model.enqueue(again:true)}}}message:{Text("A previous or uncertain restore may already exist. This creates another copy and never removes existing Photos items.")}
    .sheet(item:$viewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
-   .task{await model.loadAssets();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
+   .task{await model.loadAssets(refreshCurrent:true);while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
  }
  private func restoreRow(_ item:RestoreItem)->some View {
   VStack(alignment:.leading,spacing:12) {
