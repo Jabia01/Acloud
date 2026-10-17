@@ -376,7 +376,19 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
   const uploadPart=async (upload:any,data:Buffer,number:number) => {
     const start=(number-1)*upload.partSizeBytes,part=data.subarray(start,Math.min(start+upload.partSizeBytes,data.length));
     const auth=(await post(`/uploads/${upload.id}/parts/${number}/authorize`,{size_bytes:part.length,checksum_sha256:digest(part)}).expect(200)).body;
-    const response=await fetch(auth.url,{method:'PUT',headers:auth.headers,body:part});assert.ok(response.ok);return {part,auth};
+    const stored=(await pool.query('SELECT u.multipart_upload_id,a.storage_object_key FROM upload_sessions u JOIN assets a ON a.id=u.asset_id WHERE u.id=$1',[upload.id])).rows[0];
+    const target=new URL(auth.url);
+    assert.ok(target.searchParams.get('uploadId')===stored.multipart_upload_id,'Generated multipart upload reference mismatch');
+    assert.ok(decodeURIComponent(target.pathname).endsWith('/'+stored.storage_object_key),'Generated multipart object reference mismatch');
+    const response=await fetch(auth.url,{method:'PUT',headers:auth.headers,body:part});
+    if(!response.ok){
+      const providerCode=(await response.text()).match(/<Code>([A-Za-z0-9]+)<\/Code>/)?.[1];
+      const code=['NoSuchUpload','AccessDenied','SignatureDoesNotMatch','BadDigest','InvalidPart'].includes(providerCode??'')?providerCode:'unclassified';
+      const message='Generated multipart upload HTTP '+response.status+' code '+code;
+      if(process.env.CI==='true')console.info('::error::'+message);
+      assert.fail(message);
+    }
+    return {part,auth};
   };
   test('multipart interrupt, storage reconciliation, completion and verified private roundtrip',async()=>{
     const {data,upload}=await multipartFixture();assert.equal(upload.authorization,null);

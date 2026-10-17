@@ -60,9 +60,17 @@ jobs:
         run: |
           docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage
           docker compose --env-file .env -f infrastructure/docker/compose.yml run --rm --no-deps storage-init
-      - run: npm run test:uploads
+      - name: Run real-storage upload tests
         env:
           NODE_ENV: test
+        run: |
+          set +e
+          npm run test:uploads 2>&1 | tee "$RUNNER_TEMP/uploads.log"
+          test_exit=${PIPESTATUS[0]}
+          if [ "$test_exit" -ne 0 ]; then
+            node scripts/ci-integration-annotations.mjs "$RUNNER_TEMP/uploads.log"
+          fi
+          exit "$test_exit"
       - run: npm run security:scan
       - run: docker compose --env-file .env -f infrastructure/docker/compose.yml stop storage storage-init
         if: always() && (steps.storage.outcome == 'success' || steps.storage.outcome == 'failure')
