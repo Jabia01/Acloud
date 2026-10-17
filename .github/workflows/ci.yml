@@ -37,6 +37,8 @@ jobs:
           echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
       - run: npm run storage:configure
       - name: Run integration tests
+        env:
+          NODE_ENV: test
         run: |
           set +e
           npm run test:integration 2>&1 | tee "$RUNNER_TEMP/integration.log"
@@ -56,6 +58,8 @@ jobs:
       - id: storage
         run: docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage storage-init
       - run: npm run test:uploads
+        env:
+          NODE_ENV: test
       - run: npm run security:scan
       - run: docker compose --env-file .env -f infrastructure/docker/compose.yml stop storage storage-init
         if: always() && (steps.storage.outcome == 'success' || steps.storage.outcome == 'failure')
