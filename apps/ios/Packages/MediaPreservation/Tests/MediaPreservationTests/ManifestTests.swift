@@ -7,6 +7,16 @@ final class ManifestTests:XCTestCase{
  func captured(_ input:MediaManifest)->MediaManifest{var m=input;for i in m.resources.indices{m.resources[i].expectedSize=100;m.resources[i].expectedSha256=String(repeating:"a",count:64)};m.state = .completeLocal;return m}
  func store()throws->ManifestStore{let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);addTeardownBlock{try? FileManager.default.removeItem(at:root)};return try ManifestStore(url:root.appendingPathComponent("manifest.sqlite"))}
  func proof(_ m:MediaManifest,count:Int?=nil,protection:String="FULLY_PROTECTED",changed:Bool=false,degraded:Bool=false)throws->ServerManifestProof{let protected=count ?? m.required.count;let resources=m.resources.enumerated().map{i,r -> [String:Any] in ["id":r.id.uuidString,"role":r.descriptor.role.rawValue,"resourceType":r.descriptor.resourceType,"uti":r.descriptor.uti,"required":r.descriptor.required,"resourceClass":r.descriptor.resourceClass.rawValue,"expectedSize":r.expectedSize as Any? ?? NSNull(),"expectedSha256":r.expectedSha256 as Any? ?? NSNull(),"assetId":i<protected ? UUID().uuidString as Any:NSNull(),"cloudVersionId":i<protected ? String(repeating:"b",count:64) as Any:NSNull(),"status":i<protected ? "PROTECTED":"VERIFYING"]};let json:[String:Any]=["id":m.id.uuidString,"manifestVersion":1,"kind":m.source.kind.rawValue,"mediaType":m.source.mediaType,"policy":"PRESERVE_ALL_AVAILABLE","legacy":false,"protection":protection,"requiredCount":m.required.count,"protectedCount":protected,"sourceFingerprint":m.source.fingerprint,"sourceChanged":changed,"reviewRequired":!m.source.shapeComplete,"integrityDegraded":degraded,"manifestFingerprint":String(repeating:"c",count:64),"resources":resources];return try JSONDecoder().decode(ServerManifestProof.self,from:JSONSerialization.data(withJSONObject:json))}
+ func testPhotoKitEnumerationOrderCanonicalizesWithoutDroppingEditResources()throws {
+  func ordered(_ types:[Int])throws->[ResourceDescriptor]{let raw=types.enumerated().map{ResourceDescriptor(ordinal:$0.offset,resourceType:$0.element,uti:"public.data")};return try ResourceDescriptor.canonicalSourceOrder(raw).enumerated().map{ResourceDescriptor(ordinal:$0.offset,resourceType:raw[$0.element].resourceType,uti:raw[$0.element].uti)}}
+  let a=try ordered([1,7,9,10,5]),b=try ordered([9,5,1,7,10])
+  XCTAssertEqual(a,b);XCTAssertEqual(a.count,5)
+  XCTAssertEqual(a.map(\.resourceType),[1,5,7,9,10])
+ }
+ func testAmbiguousRepeatedPhotoKitResourceIdentityFailsClosed(){
+  let raw=[ResourceDescriptor(ordinal:0,resourceType:1,uti:"public.jpeg"),ResourceDescriptor(ordinal:1,resourceType:1,uti:"public.jpeg")]
+  XCTAssertThrowsError(try ResourceDescriptor.canonicalSourceOrder(raw))
+ }
  func testOrdinaryPhotoManifestComplete(){XCTAssertTrue(captured(manifest()).completeLocal)}
  func testOrdinaryVideoManifestComplete(){XCTAssertTrue(captured(manifest([2])).completeLocal)}
  func testLivePhotoRequiresPair(){XCTAssertFalse(manifest([1],live:true).source.shapeComplete);XCTAssertTrue(captured(manifest([1,9],live:true)).completeLocal)}

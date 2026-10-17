@@ -9,6 +9,11 @@ public struct ManifestBinding:Codable,Equatable,Sendable{public let accountID:UU
 public struct ResourceDescriptor:Codable,Equatable,Sendable{
  public let ordinal:Int,resourceType:Int,uti:String,role:ResourceRole,resourceClass:ResourceClass,required:Bool
  public init(ordinal:Int,resourceType:Int,uti:String){self.ordinal=ordinal;self.resourceType=resourceType;self.uti=uti;let raw=uti.lowercased().contains("raw")||uti.lowercased().contains("dng");switch resourceType{case 1:role=raw ? .raw:.still;resourceClass = .original;required=true;case 2:role = .video;resourceClass = .original;required=true;case 4:role=raw ? .raw:.jpeg;resourceClass = .original;required=true;case 9:role = .pairedVideo;resourceClass = .original;required=true;case 5,6,10:role = .edited;resourceClass = .edited;required=true;case 7:role = .adjustment;resourceClass = .auxiliary;required=true;case 8,11,12:role = .adjustmentBase;resourceClass = .auxiliary;required=true;case 19:role = .preview;resourceClass = .derived;required=false;default:role = .unknownRequired;resourceClass = .unknown;required=true}}
+ // PhotoKit enumeration order is not an identity. Preserve every distinct public resource type/UTI.
+ public static func canonicalSourceOrder(_ descriptors:[ResourceDescriptor])throws->[Int]{
+  guard !descriptors.isEmpty,descriptors.count<=16,descriptors.allSatisfy(\.safe),Set(descriptors.map{String($0.resourceType)+"|"+$0.uti}).count==descriptors.count else{throw ManifestFailure.unsupported}
+  return descriptors.indices.sorted{a,b in descriptors[a].resourceType==descriptors[b].resourceType ? descriptors[a].uti<descriptors[b].uti:descriptors[a].resourceType<descriptors[b].resourceType}
+ }
  public var safe:Bool{ordinal>=0&&ordinal<16&&resourceType>0&&resourceType<=65535&&uti.range(of:"^[-a-zA-Z0-9.]{1,128}$",options:.regularExpression) != nil}
 }
 public struct MediaSourceSnapshot:Codable,Equatable,Sendable{

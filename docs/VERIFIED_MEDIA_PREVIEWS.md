@@ -4,6 +4,8 @@ Preview loading uses `/restore/assets/:id/preview`, `/preview/authorize` and `/p
 
 The server requires the authenticated device/session, existing owner-test or beta download gates, private storage binding and successful size/checksum verification. Originals must be at most 32 MiB. A manifest-backed resource must belong to complete, unchanged, non-degraded preservation with no review flag. Only ordinary/legacy, Live Photo or edited manifests and primary still/video or edited-render roles qualify. Adjustment recipes, paired motion and unknown/RAW bundles cannot be downloaded through this route. Authorization pins the immutable version and checks current storage size/version; recheck repeats the preservation checks.
 
+PhotoKit capture sorts public resource descriptors by type/UTI consistently for snapshots and streaming; ambiguous duplicate identities are rejected. This prevents enumeration-order changes from being treated as source edits. Modification dates, dimensions, resource membership and exact byte checks still detect real changes. Existing source-changed attempts must be selected again explicitly; they are not silently rehabilitated.
+
 The app explicitly downloads over an unmetered connection, checks size/SHA-256 and current proof, creates a private reduced-resolution JPEG, and removes the temporary original. It never saves to Photos, reconstructs a Live Photo or asserts full complex restore acceptance. Cellular, expensive and constrained downloads remain disabled. Photos and videos have saved-version thumbnails; a Live Photo thumbnail is a still, not motion playback. Existing local thumbnail capture from protected staged bytes remains available without a network download.
 
 Edited-media acceptance has separate layers:
