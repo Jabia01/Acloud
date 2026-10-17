@@ -556,6 +556,7 @@ struct BackupQueueView:View {
      Text("Transfer reference: B-\(item.id.uuidString.prefix(8))").textSelection(.enabled)
      Text("Last updated \(item.updatedAt.formatted(.dateTime.month(.abbreviated).day().year().hour().minute()))")
      if let guidance=backupGuidance(item){Text(guidance)}
+     if let stage=item.lastFailureStage,[.failedRetryable,.failedPermanent,.paused].contains(item.state){Text("Stopped while: \(stage)").textSelection(.enabled)}
      if let code=item.lastErrorCode,item.state != .protected {Text(code).textSelection(.enabled)}
     }.font(.caption).foregroundStyle(.secondary)
    }.font(.caption)

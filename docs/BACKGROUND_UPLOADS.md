@@ -32,3 +32,7 @@ A background multipart step that receives `URLError.networkConnectionLost` (`NET
 ## Starting queued work
 
 Explicit selection, retry, resume and restart request queue execution immediately, before history/manifest refreshes. Requests arriving while a worker is running trigger another pass after its current work and refresh finish. Periodic recovery scheduling lives at the app tab-container level, so changing tabs does not remove it. The timer is only a foreground fallback; it is not an iOS background-execution entitlement. Preparing originals and handing a file to the background session must still occur before system suspension. Physical locked-screen completion remains an acceptance check, not a conclusion from successful builds.
+
+## Interruption diagnostics
+
+Failed attempts now persist a bounded app-defined stage alongside the existing sanitized error code. Details & support shows “Stopped while…” to distinguish original preparation, session setup, authorization, byte transfer, part reconciliation and verification. No media identifier, filename, URL, credential or server body is added. Old records decode with no stage, and explicit retry/resume clears stale stage details. This is diagnostic coverage; physical background completion remains unconfirmed until an actual locked-device run succeeds.

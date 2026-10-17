@@ -44,6 +44,7 @@ public struct BackupItem: Codable, Sendable, Identifiable {
  public var retryCount = 0
  public var nextRetryAt: Date?
  public var lastErrorCode: String?
+ public var lastFailureStage: String?
  public var localRemovedAfterProtection:Bool?
  public var cancellationPending = false
  public var revision = 0

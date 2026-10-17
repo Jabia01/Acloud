@@ -12,6 +12,7 @@ public actor BackupCoordinator {
  private var policy:BackupPolicy
  private var network=NetworkSnapshot(connected:false)
  private var active:[UUID:Task<Void,Error>]=[:]
+ private var failureStages:[UUID:String]=[:]
  public init(queue:SQLiteBackupQueue,api:any MultipartAPI,transport:any PartTransport,preparer:any ResourcePreparer,files:ManagedTemporaryFiles,policy:BackupPolicy=BackupPolicy(),retry:RetryPolicy=RetryPolicy(),onProtected:@escaping @Sendable() async->Void={}) {
   self.queue=queue;self.api=api;self.transport=transport;self.preparer=preparer;self.files=files;self.policy=policy;self.retry=retry;self.onProtected=onProtected
  }
@@ -24,7 +25,7 @@ public actor BackupCoordinator {
  public func run(_ id:UUID) async throws {
   guard active[id]==nil else{return}
   guard !(await transport.activeItemIDs()).contains(id),active[id]==nil else{return}
-  let task=Task{try await self.execute(id)};active[id]=task;defer{active[id]=nil}
+  let task=Task{try await self.execute(id)};active[id]=task;defer{active[id]=nil;failureStages[id]=nil}
   try await withTaskCancellationHandler(operation:{try await task.value},onCancel:{task.cancel()})
  }
  private func current(_ id:UUID) async throws -> BackupItem {
@@ -39,7 +40,7 @@ public actor BackupCoordinator {
   let asset=try await api.asset(assetID)
   guard asset.status == .protected else{return false}
   // Re-read after network suspension. Do not overwrite a newer control operation.
-  guard let latest=try await queue.read(id) else{throw BackupFailure.missing};item=latest;item.state = .protected;item.cancellationPending=false;item.lastErrorCode=nil;item.nextRetryAt=nil
+  guard let latest=try await queue.read(id) else{throw BackupFailure.missing};item=latest;item.state = .protected;item.cancellationPending=false;item.lastErrorCode=nil;item.lastFailureStage=nil;item.nextRetryAt=nil
   var originalProof:OriginalServerProof?
   if var manifest=item.originalManifest {
    guard let verified=try await api.integrity(assetID),verified.id==assetID,manifest.matches(verified) else{throw BackupFailure.sourceChanged}
@@ -52,6 +53,7 @@ public actor BackupCoordinator {
   guard var item=try await queue.read(id) else{throw BackupFailure.missing}
   if item.state == .protected{try await preparer.cleanup(item);return}
   do {
+   failureStages[id]="Checking saved backup"
    if try await proof(id){return}
    if item.state == .cancelled {
     if item.cancellationPending {
@@ -68,8 +70,10 @@ public actor BackupCoordinator {
    if let due=item.nextRetryAt,due>Date(){return}
    // Reconcile completed server work before requesting the local original.
    if let sessionID=item.sessionID {
+    failureStages[id]="Checking upload session"
     let remote=try await api.status(sessionID)
     if remote.status == .cancelled || remote.status == .expired{throw BackupFailure.http(410)}
+    failureStages[id]="Reconciling interrupted transfer"
     let listing=try await api.parts(sessionID)
     if listing.completed {
      _=try await transition(id,.uploaded);_=try await transition(id,.verifying)
@@ -78,17 +82,20 @@ public actor BackupCoordinator {
    }
    guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");return}
    _=try await transition(id,.preparing)
+   failureStages[id]="Preparing original"
    let resource=try await preparer.prepare(item,policy:policy,network:network)
    item=try await current(id)
    if let checksum=item.expectedChecksum,checksum != resource.checksum{throw BackupFailure.sourceChanged}
    if let size=item.expectedSizeBytes,size != resource.sizeBytes{throw BackupFailure.sourceChanged}
    item.originalManifest=resource.manifest ?? item.originalManifest;item.expectedSizeBytes=resource.sizeBytes;item.expectedChecksum=resource.checksum;item=try await queue.save(item)
    guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");return}
+   failureStages[id]="Starting upload session"
    let session=try await api.create(item)
    item=try await queue.read(id) ?? item;item.sessionID=session.id;item.assetID=session.assetId;item=try await queue.save(item)
    if try await proof(id){return}
    _=try await current(id)
    if session.status == .expired || session.status == .cancelled{throw BackupFailure.http(410)}
+   failureStages[id]="Starting multipart upload"
    _=try await api.start(session.id)
    var listing=try await api.parts(session.id)
    if !listing.completed {
@@ -99,6 +106,7 @@ public actor BackupCoordinator {
     for number in 1...count {
      item=try await current(id);guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");return}
      if listing.parts.contains(where:{$0.partNumber==number}){continue}
+     failureStages[id]="Preparing upload part"
      let part=try files.part(resource,id:id,number:number,size:size)
      do {
       // Authorization is always fresh and exists only in memory / system transfer daemon.
@@ -108,6 +116,7 @@ public actor BackupCoordinator {
       try files.remove(part.fileURL)
      } catch {try? files.remove(part.fileURL);throw error}
     }
+    failureStages[id]="Completing uploaded parts"
     _=try await api.complete(session.id)
    }
    _=try await transition(id,.uploaded);_=try await transition(id,.verifying)
@@ -128,6 +137,7 @@ public actor BackupCoordinator {
     else if error is DecodingError { latest.lastErrorCode="SERVER_RESPONSE_INVALID" }
     else { latest.lastErrorCode=canRetry ? "TRANSFER_RETRY" : "TRANSFER_REQUIRES_ACTION" }
    }
+   latest.lastFailureStage=failureStages[id]
    _=try await queue.save(latest);try await preparer.cleanup(latest);throw error
   }
  }
@@ -139,10 +149,13 @@ public actor BackupCoordinator {
    let item=try await current(id)
    guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");throw CancellationError()}
    do {
+    failureStages[id]="Getting upload permission"
     let auth=try await api.authorize(sessionID,number:number,size:part.sizeBytes,checksum:part.checksum)
     _=try await current(id)
+    failureStages[id]="Transferring file bytes"
     try await transport.upload(item:id,number:number,resource:part,authorization:auth,policy:policy)
     _=try await current(id)
+    failureStages[id]="Checking received parts"
     return try await api.parts(sessionID)
    } catch {
     guard transport.keepsTransfersDuringConnectionLoss,
@@ -152,6 +165,7 @@ public actor BackupCoordinator {
     try await Task.sleep(for:.seconds(recoveries))
     _=try await current(id)
     // A lost response may mean storage accepted the bytes. Never blindly resend.
+    failureStages[id]="Reconciling interrupted transfer"
     let listing=try await api.parts(sessionID)
     _=try await current(id)
     if listing.completed || listing.parts.contains(where:{$0.partNumber==number}){return listing}
@@ -160,6 +174,7 @@ public actor BackupCoordinator {
   }
  }
  private func verify(_ id:UUID,sessionID:UUID) async throws {
+  failureStages[id]="Verifying saved backup"
   let result=try await api.verify(sessionID)
   if try await proof(id){return}
   if result.status == .failed {
@@ -178,7 +193,7 @@ public actor BackupCoordinator {
  }
  public func resume(_ id:UUID) async throws {
   guard var item=try await queue.read(id),item.state == .paused else{return}
-  item.state = .queued;item.nextRetryAt=nil;item.lastErrorCode=nil;_=try await queue.save(item)
+  item.state = .queued;item.nextRetryAt=nil;item.lastErrorCode=nil;item.lastFailureStage=nil;_=try await queue.save(item)
  }
  public func retryFailed(_ id:UUID) async throws {
   guard var item=try await queue.read(id),[.failedPermanent,.failedRetryable].contains(item.state) else{return}
@@ -186,7 +201,7 @@ public actor BackupCoordinator {
    if try await proof(id){return}
    item.uploadKey=UUID();item.sessionID=nil;item.assetID=nil;item.bytesUploaded=0;try await queue.replaceParts(id,parts:[])
   }
-  item.state = .queued;item.retryCount=0;item.nextRetryAt=nil;item.lastErrorCode=nil;_=try await queue.save(item)
+  item.state = .queued;item.retryCount=0;item.nextRetryAt=nil;item.lastErrorCode=nil;item.lastFailureStage=nil;_=try await queue.save(item)
  }
  public func settleCancellation(_ id:UUID)async throws->BackupItem {
   guard let old=try await queue.read(id),old.state == .cancelled else{throw BackupFailure.illegalTransition}

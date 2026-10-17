@@ -88,6 +88,19 @@ final class BackupEngineTests:XCTestCase {
   XCTAssertEqual(verified,1);XCTAssertEqual(state,.protected)
   try await e.reconcileStartup();let afterRelaunch=await events.count;XCTAssertEqual(afterRelaunch,1)
  }
+ func testFailureStageSurvivesQueueReopenWithoutChangingLegacyRecords()async throws {
+  let(q,e,api,_,item,_,d)=try await fixture(bytes:100)
+  await api.failVerification(true);do{try await e.run(item.id);XCTFail()}catch{}
+  let reopened=try SQLiteBackupQueue(url:d.appendingPathComponent("queue.sqlite"))
+  let failed=try await reopened.read(item.id)
+  XCTAssertEqual(failed?.lastFailureStage,"Verifying saved backup")
+  try await e.retryFailed(item.id);let retried=try await q.read(item.id)
+  XCTAssertNil(retried?.lastFailureStage)
+  var legacy=try JSONSerialization.jsonObject(with:JSONEncoder().encode(item)) as! [String:Any]
+  legacy.removeValue(forKey:"lastFailureStage")
+  let decoded=try JSONDecoder().decode(BackupItem.self,from:JSONSerialization.data(withJSONObject:legacy))
+  XCTAssertNil(decoded.lastFailureStage)
+ }
  func testBackgroundConnectionLossRecoversWithoutForegroundTimer()async throws {
   let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=TestTransport(api:api,background:true)
   await transport.configure(fail:1)
