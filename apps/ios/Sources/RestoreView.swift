@@ -182,43 +182,63 @@ struct RestoreView:View {
  @ObservedObject private var model=RestoreModel.shared
  @State private var confirmAnother=false
  @State private var mediaFilter:AcloudMediaFilter = .all
+ @State private var galleryFilter:AcloudGalleryFilter = .all
+ @State private var galleryOrder:AcloudGalleryOrder = .newest
+ @State private var gallerySize:AcloudGallerySize = .medium
+ @State private var selecting=false
+ @State private var viewer:AcloudGalleryPresentation?
+ private var gallery:[AcloudGalleryEntry] {
+  model.assets.map{asset in AcloudGalleryEntry(id:asset.id.uuidString,type:asset.mediaType,date:asset.backupDate,duration:asset.durationSeconds,account:model.previewAccount,asset:asset.id,checksum:model.previewChecksum(asset.id))}
+   .filter{galleryFilter.includes($0)}.sorted{a,b in
+    if a.date != b.date {if a.date==nil{return false};if b.date==nil{return true};return galleryOrder == .newest ? a.date!>b.date!:a.date!<b.date!}
+    return a.id<b.id
+   }
+ }
  var body:some View {
   NavigationStack {
    List {
-    Section {AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Back to your Photos.",message:"Select a verified backup to save a new copy to your device. Your cloud backup stays protected.").acloudFeatureRow()}
-    Section("Restore your backups") {
+    Section {
+     Text("Save a new copy to Photos. Your cloud backup stays unchanged; restored items may sync to iCloud.").font(.subheadline).foregroundStyle(.secondary)
+     Text(model.message).font(.caption).foregroundStyle(.secondary)
+     if PHPhotoLibrary.authorizationStatus(for:.addOnly) != .authorized && ![PHAuthorizationStatus.authorized,.limited].contains(PHPhotoLibrary.authorizationStatus(for:.readWrite)) {
+      Button("Allow saving to Photos"){Task{await model.requestPermission()}}.disabled(!model.canRestore)
+     }
+    }
+    Section("Choose items to restore") {
+     HStack {
+      Text("Saved photos & videos").font(.headline)
+      Spacer()
+      Button(selecting ? "Done":"Select"){selecting.toggle()}.buttonStyle(.bordered).disabled(model.busy || !model.canRestore)
+     }
+     AcloudGalleryControls(filter:$galleryFilter,order:$galleryOrder,size:$gallerySize,includeLivePhotos:false)
+     if selecting {
+      HStack {
+       Button("Select up to 10"){model.selectVisible(gallery.compactMap{entry in model.assets.first{$0.id.uuidString==entry.id}})}.disabled(model.busy || !model.canRestore || gallery.isEmpty)
+       Spacer()
+       Button("Clear"){model.selected=[]}.disabled(model.busy || model.selected.isEmpty)
+      }
+     }
+     Text(selecting ? "Tap photos to select them. Up to 10 per restore batch.":"Tap a thumbnail to view. Choose Select to restore several items together.").font(.footnote).foregroundStyle(.secondary)
+     if !model.canRestore{Text("Restore access is currently unavailable for this session. Existing cloud backups stay protected.").foregroundStyle(.secondary)}
+     else if gallery.isEmpty{ContentUnavailableView("No matching saved items",systemImage:"photo.on.rectangle",description:Text("Try another media filter or refresh the protected library."))}
+     AcloudGalleryGrid(items:gallery,order:galleryOrder,size:gallerySize,selecting:selecting,selected:Set(model.selected.map(\.uuidString)),onSelect:{entry in if let id=UUID(uuidString:entry.id){model.select(id,on:!model.selected.contains(id))}},onOpen:{entry in viewer=AcloudGalleryPresentation(items:gallery,startID:entry.id)})
+      .disabled(model.busy)
+    }
+    Section {
+     DisclosureGroup("Restore options & information") {
      Text(RestoreCopy.iCloudWarning).font(.footnote)
      Text("Restore creates a new Photos copy. Cloud protection and quota stay unchanged.").font(.footnote)
      Text(model.message).font(.subheadline)
      if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))").font(.caption)}
      VStack(alignment:.leading,spacing:8) {
-      Label(model.selected.isEmpty ? "Choose items below":"\(model.selected.count) of 10 selected",systemImage:"checkmark.circle").font(.headline)
+      Label(model.selected.isEmpty ? "Choose items in the gallery":"\(model.selected.count) of 10 selected",systemImage:"checkmark.circle").font(.headline)
       Text(model.selected.isEmpty ? "Select photos or videos to see the restore size here.":"\(model.selectedPhotos) photos · \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))").font(.subheadline).foregroundStyle(.secondary)
      }.padding(14).frame(maxWidth:.infinity,alignment:.leading).background(AcloudStyle.accent.opacity(0.06),in:RoundedRectangle(cornerRadius:14))
      Button("Allow Photos additions"){Task{await model.requestPermission()}}.disabled(!model.canRestore)
      Button{Task{await model.enqueue()}}label:{Label(model.selected.isEmpty ? "Select items to restore":"Restore \(model.selected.count) to Photos",systemImage:"arrow.down.circle.fill").frame(maxWidth:.infinity)}
       .buttonStyle(.borderedProminent).controlSize(.large).disabled(model.selected.isEmpty || model.busy || !model.canRestore)
      Button("Restore another copy…"){confirmAnother=true}.disabled(model.selected.isEmpty || !model.canRestore)
-    }
-    Section("Choose items to restore") {
-     Picker("Media type",selection:$mediaFilter){ForEach(AcloudMediaFilter.allCases){filter in Text(filter.rawValue).tag(filter)}}.pickerStyle(.segmented)
-     HStack {
-      Button("Select up to 10 visible items"){model.selectVisible(model.assets.filter{mediaFilter.includes($0.mediaType)})}.disabled(model.busy || !model.canRestore || model.assets.isEmpty)
-      Spacer()
-      Button("Clear selection"){model.selected=[]}.disabled(model.busy || model.selected.isEmpty)
      }
-     Text("Select several photos or videos, then tap Restore selected to Photos. Up to 10 items per batch.").font(.footnote)
-     Text("Grouped by backup date, newest first. Thumbnails show the saved version. Device edits do not change these backups.").font(.caption).foregroundStyle(.secondary)
-     if !model.canRestore{Text("Restore access is currently unavailable for this session. This does not mean your protected backups are missing.").foregroundStyle(.secondary)}
-     else if model.assets.isEmpty{Text("No verified backups are available in this page.").foregroundStyle(.secondary)}
-     else if model.assets.filter({mediaFilter.includes($0.mediaType)}).isEmpty{Text("No \(mediaFilter.rawValue.lowercased()) in this page.").foregroundStyle(.secondary)}
-    }
-    ForEach(acloudMediaGroups(model.assets.filter{mediaFilter.includes($0.mediaType)},type:{$0.mediaType},date:{$0.backupDate})) {group in
-     Section {ForEach(group.items){asset in
-      Toggle(isOn:Binding(get:{model.selected.contains(asset.id)},set:{model.select(asset.id,on:$0)})) {
-       AcloudMediaHeader(type:asset.mediaType,reference:asset.id,previewSource:.backupVersion,previewAccount:model.previewAccount,previewAsset:asset.id,previewChecksum:model.previewChecksum(asset.id),dateLabel:"Backed up",date:asset.backupDate,detail:asset.sizeBytes.map{"Verified size · \($0.formatted(.byteCount(style:.file)))"} ?? "Verified backup · size unavailable")
-      }.padding(.vertical,8).disabled(model.busy || !model.canRestore)
-     }} header:{AcloudMediaGroupTitle(title:group.title+" · verified backups",date:group.day)}
     }
     Section {
      Button("Refresh protected library"){Task{await model.loadAssets()}}.disabled(model.busy)
@@ -234,7 +254,10 @@ struct RestoreView:View {
      }
     }
     if !model.items.isEmpty {
-     Section("Restore progress"){Text("Grouped by the date each restore was requested.").font(.caption).foregroundStyle(.secondary)}
+     Section("Restore progress"){
+      Picker("Media type",selection:$mediaFilter){ForEach(AcloudMediaFilter.allCases){Text($0.rawValue).tag($0)}}.pickerStyle(.segmented)
+      Text("Grouped by the date each restore was requested.").font(.caption).foregroundStyle(.secondary)
+     }
      ForEach(acloudMediaGroups(model.items.filter{mediaFilter.includes($0.evidence.mediaType)},type:{$0.evidence.mediaType},date:{$0.createdAt})){group in
       Section {ForEach(group.items){item in restoreRow(item)}} header:{AcloudMediaGroupTitle(title:group.title+" · restores",date:group.day)}
      }
@@ -247,7 +270,18 @@ struct RestoreView:View {
      if model.showingLaterQueuePage{Button("First queue page"){Task{await model.firstQueuePage()}}}
     }}
    }.acloudCanvas().navigationTitle("Restore")
+    .safeAreaInset(edge:.bottom) {
+     if selecting || !model.selected.isEmpty {
+      HStack {
+       Button("Cancel selection"){model.selected=[];selecting=false}.disabled(model.busy)
+       Spacer()
+       Button{Task{await model.enqueue()}}label:{Label("Restore \(model.selected.count) selected",systemImage:"arrow.down.circle.fill")}
+        .buttonStyle(.borderedProminent).disabled(model.selected.isEmpty || model.busy || !model.canRestore)
+      }.padding().background(.regularMaterial)
+     }
+    }
   }.confirmationDialog("Create another Photos copy?",isPresented:$confirmAnother,titleVisibility:.visible){Button("Restore another copy"){Task{await model.enqueue(again:true)}}}message:{Text("A previous or uncertain restore may already exist. This creates another copy and never removes existing Photos items.")}
+   .sheet(item:$viewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
    .task{await model.loadAssets();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
  }
  private func restoreRow(_ item:RestoreItem)->some View {

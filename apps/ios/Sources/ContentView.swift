@@ -160,6 +160,7 @@ struct AcloudMediaHeader:View {
     let date:Date?
     var detail:String?=nil
     @State private var capturedAt:Date?
+    @State private var galleryViewer:AcloudGalleryPresentation?
     var body:some View {
         HStack(alignment:.top,spacing:14) {
             ZStack(alignment:.bottomTrailing) {
@@ -172,7 +173,13 @@ struct AcloudMediaHeader:View {
                     AcloudSavedThumbnail(account:account,asset:asset,checksum:previewChecksum).id(account.uuidString+asset.uuidString+(previewChecksum ?? ""))
                 }
                 if type == "video" {Image(systemName:"play.fill").font(.caption2).padding(6).foregroundStyle(.white).background(.black.opacity(0.65),in:Circle()).padding(5)}
-            }.frame(width:76,height:76).accessibilityHidden(true)
+            }.frame(width:76,height:76)
+             .contentShape(Rectangle()).onTapGesture {
+                if ["image","video"].contains(type) {
+                    galleryViewer=AcloudGalleryPresentation(items:[AcloudGalleryEntry(id:reference.uuidString,type:type,date:sourceCaptureDate ?? date,localID:previewSource == .device ? localID:nil,account:previewAccount,asset:previewAsset,checksum:previewChecksum)],startID:reference.uuidString)
+                }
+             }.accessibilityLabel("Open \(type == "video" ? "video":"photo") preview").accessibilityAddTraits(.isButton)
+             .sheet(item:$galleryViewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
             VStack(alignment:.leading,spacing:5) {
                 Text("\(type == "video" ? "Video":type == "image" ? "Photo":"File") · \(reference.uuidString.prefix(6))")
                     .font(.headline).foregroundStyle(.primary)
@@ -192,9 +199,10 @@ struct AcloudMediaHeader:View {
         }
     }
 }
-private struct AcloudLocalThumbnail:UIViewRepresentable {
+struct AcloudLocalThumbnail:UIViewRepresentable {
     let localID:String?
     @Binding var captureDate:Date?
+    var targetSize:CGFloat=320
     final class Coordinator {
         var identity:String?
         var token=UUID()
@@ -207,6 +215,10 @@ private struct AcloudLocalThumbnail:UIViewRepresentable {
         view.setContentHuggingPriority(.defaultLow,for:.horizontal)
         view.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
         return view
+    }
+    func sizeThatFits(_ proposal:ProposedViewSize,uiView:UIImageView,context:Context)->CGSize? {
+        guard let width=proposal.width,let height=proposal.height else{return nil}
+        return CGSize(width:width,height:height)
     }
     func updateUIView(_ view:UIImageView,context:Context) {
         let status=PHPhotoLibrary.authorizationStatus(for:.readWrite)
@@ -221,7 +233,7 @@ private struct AcloudLocalThumbnail:UIViewRepresentable {
         DispatchQueue.main.async {if coordinator.token==token{binding.wrappedValue=asset?.creationDate}}
         guard let asset else{return}
         let options=PHImageRequestOptions();options.isNetworkAccessAllowed=false;options.deliveryMode = .opportunistic;options.resizeMode = .fast
-        coordinator.request=coordinator.manager.requestImage(for:asset,targetSize:CGSize(width:160,height:160),contentMode:.aspectFill,options:options){[weak view,weak coordinator] image,_ in
+        coordinator.request=coordinator.manager.requestImage(for:asset,targetSize:CGSize(width:targetSize,height:targetSize),contentMode:.aspectFill,options:options){[weak view,weak coordinator] image,_ in
             DispatchQueue.main.async {guard let coordinator,coordinator.token==token else{return};view?.image=image}
         }
     }
@@ -361,10 +373,11 @@ private struct AcloudSavedThumbnail:View {
     @ObservedObject private var registry=AcloudPreviewRegistry.shared
     var body:some View {AcloudPreviewImage(loader:registry.loader(account:account,asset:asset,checksum:checksum))}
 }
-private struct AcloudPreviewImage:View {
+struct AcloudPreviewImage:View {
     @ObservedObject var loader:AcloudPreviewLoader
+    var side:CGFloat=76
     var body:some View {
-        if let data=loader.data,let image=UIImage(data:data) {Image(uiImage:image).resizable().scaledToFill().frame(width:76,height:76).clipped().clipShape(RoundedRectangle(cornerRadius:12))}
+        if let data=loader.data,let image=UIImage(data:data) {Image(uiImage:image).resizable().scaledToFill().frame(width:side,height:side).clipped().clipShape(RoundedRectangle(cornerRadius:12))}
     }
 }
 @MainActor final class AcloudPreviewRegistry:ObservableObject {

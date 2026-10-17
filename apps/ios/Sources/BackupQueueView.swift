@@ -348,6 +348,25 @@ struct BackupQueueView:View {
  @ObservedObject private var model=BackupQueueModel.shared
  private enum PickerSelection:String,Identifiable {case photo,video,originals;var id:String{rawValue}}
  @State private var pickerSelection:PickerSelection?
+ @AppStorage("backupBrowserMode") private var browserMode="gallery"
+ @State private var galleryFilter:AcloudGalleryFilter = .all
+ @State private var galleryOrder:AcloudGalleryOrder = .newest
+ @State private var gallerySize:AcloudGallerySize = .medium
+ @State private var galleryViewer:AcloudGalleryPresentation?
+ private var savedGallery:[AcloudGalleryEntry] {
+  model.items.compactMap{item -> AcloudGalleryEntry? in
+   guard item.state == .protected,["image","video"].contains(item.mediaType),let asset=item.assetID else{return nil}
+   var date=item.originalManifest?.source.creation ?? item.createdAt,live=false
+   if let binding=item.mediaResourceBinding {
+    guard let manifest=model.manifests.first(where:{$0.id==binding.manifestID}),[.fullyProtected,.restoreReady].contains(manifest.state),previewResource(manifest)?.id==item.id else{return nil}
+    date=manifest.source.creation ?? item.createdAt;live=manifest.source.kind == .livePhoto
+   }
+   return AcloudGalleryEntry(id:asset.uuidString,type:item.mediaType,date:date,live:live,account:model.previewAccount,asset:asset,checksum:item.expectedChecksum)
+  }.filter{galleryFilter.includes($0)}.sorted{a,b in
+   if a.date != b.date{if a.date==nil{return false};if b.date==nil{return true};return galleryOrder == .newest ? a.date!>b.date!:a.date!<b.date!}
+   return a.id<b.id
+  }
+ }
  private enum QueueFilter:String,CaseIterable {case all="All transfers",active="In progress",attention="Needs attention",verified="Verified"}
  @State private var queueFilter:QueueFilter = .all
  @State private var transferFilter:AcloudMediaFilter = .all
@@ -366,6 +385,10 @@ struct BackupQueueView:View {
  var body:some View {
   NavigationStack {
    List {
+    Section {
+     Picker("Browse backups",selection:$browserMode){Text("Gallery").tag("gallery");Text("Transfers").tag("transfers")}.pickerStyle(.segmented)
+    }
+    if browserMode == "transfers" {
     Section {
      AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Make room for memories.",message:"Choose what to back up. We check each stored file before marking it protected. Keep your originals during beta.").acloudFeatureRow()
      LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
@@ -394,6 +417,26 @@ struct BackupQueueView:View {
      if model.originalProgress>0 {ProgressView("Preparing original",value:model.originalProgress)}
      Text(model.message).font(.footnote).foregroundStyle(.secondary)
     }
+    } else {
+     Section {
+      Button{pickerSelection = .originals}label:{Label("Choose photos & videos to back up",systemImage:"plus.circle.fill").frame(maxWidth:.infinity)}
+       .buttonStyle(.borderedProminent).disabled(!model.canSelectOriginals || model.busy)
+      Text(model.message).font(.caption).foregroundStyle(.secondary)
+      HStack {
+       Text("Up to 10 items. Originals stay in Photos; beta limits apply.").font(.caption).foregroundStyle(.secondary)
+       Spacer()
+       Button("Backup options"){browserMode="transfers"}.font(.caption)
+      }
+     }
+    }
+    if browserMode == "gallery" {
+     Section("Saved photos & videos") {
+      AcloudGalleryControls(filter:$galleryFilter,order:$galleryOrder,size:$gallerySize)
+      Text("Tap a thumbnail to view its saved version. This gallery shows completed items from the loaded transfers; open Restore for your protected library.").font(.caption).foregroundStyle(.secondary)
+      if savedGallery.isEmpty{ContentUnavailableView("No matching saved items on this page",systemImage:"photo.on.rectangle",description:Text("Try another filter or check Transfers for work in progress."))}
+      AcloudGalleryGrid(items:savedGallery,order:galleryOrder,size:gallerySize,onSelect:{_ in},onOpen:{entry in galleryViewer=AcloudGalleryPresentation(items:savedGallery,startID:entry.id)})
+     }
+    } else {
     Section("Your transfers") {
      Picker("Media type",selection:$transferFilter) {
       ForEach(AcloudMediaFilter.allCases){filter in Text(filter.rawValue).tag(filter)}
@@ -411,11 +454,12 @@ struct BackupQueueView:View {
     ForEach(acloudMediaGroups(visibleTransfers,type:{$0.mediaType},date:{$0.createdAt})) {group in
      Section {ForEach(group.items){item in transferRow(item)}} header:{AcloudMediaGroupTitle(title:group.title+" · transfers",date:group.day)}
     }
+    }
     if model.hasOlderTransfers || model.showingOlderTransfers {Section {
      if model.hasOlderTransfers{Button("Older transfers"){Task{await model.loadOlderTransfers()}}}
      if model.showingOlderTransfers{Button("Latest transfers"){Task{await model.loadLatestTransfers()}}}
     }}
-    if !model.manifests.isEmpty {
+    if browserMode == "transfers",!model.manifests.isEmpty {
      Section("Backup completeness") {
       ForEach(model.manifests){manifest in
        VStack(alignment:.leading,spacing:10) {
@@ -439,7 +483,8 @@ struct BackupQueueView:View {
     }
     #endif
    }.acloudCanvas().navigationTitle("Backup")
-  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(filter:selection == .video ? .videos:selection == .photo ? .images:.any(of:[.images,.videos])){result in pickerSelection=nil;guard let result else{return};transferFilter = .all;queueFilter = .all;Task{await model.enqueueSelected(result.identifiers,unavailableCount:result.unavailableCount)}}.id(selection.id)}
+  }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(filter:selection == .video ? .videos:selection == .photo ? .images:.any(of:[.images,.videos])){result in pickerSelection=nil;guard let result else{return};transferFilter = .all;queueFilter = .all;browserMode="transfers";Task{await model.enqueueSelected(result.identifiers,unavailableCount:result.unavailableCount)}}.id(selection.id)}
+   .sheet(item:$galleryViewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
    .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
    .task{await model.refresh();while !Task.isCancelled{await model.tick();try? await Task.sleep(for:.seconds(5))}}
  }
