@@ -36,7 +36,15 @@ jobs:
           sudo apt-get install --yes postgresql-client-17
           echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
       - run: npm run storage:configure
-      - run: npm run test:integration
+      - name: Run integration tests
+        run: |
+          set +e
+          npm run test:integration 2>&1 | tee "$RUNNER_TEMP/integration.log"
+          test_exit=${PIPESTATUS[0]}
+          if [ "$test_exit" -ne 0 ]; then
+            node scripts/ci-integration-annotations.mjs "$RUNNER_TEMP/integration.log"
+          fi
+          exit "$test_exit"
       - run: npm run build
         env:
           APP_ENV: staging
