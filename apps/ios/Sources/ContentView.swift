@@ -304,6 +304,47 @@ struct AcloudPreviewPreparer:ResourcePreparer {
     }
 }
 
+// Only fixed text and numeric status codes are shown; URLs and server error bodies stay private.
+enum AcloudPreviewFailureMessage {
+    static func describe(_ error:Error,step:String)->String {
+        let reason:String
+        if let failure=error as? RestoreFailure {
+            switch failure {
+            case .http(401),.http(403),.authorization,.disabled:reason="Preview access was refused. Sign in again or check test access."
+            case .http(409):reason="This saved format requires complete-media restore access before a preview can load."
+            case .http(let status):reason="The server returned HTTP \(status). Try again later."
+            case .unsupported:reason="A thumbnail is unavailable for this file type or size."
+            case .integrity,.versionChanged:reason="The saved file could not be verified. No preview was created."
+            default:reason="The saved preview could not be loaded."
+            }
+        } else if let failure=error as? AccountAPIError {
+            switch failure {
+            case .unauthorized:reason="Your sign-in has expired. Sign in again."
+            case .invalidConfiguration:reason="The app could not confirm its staging configuration."
+            case .requestFailed:reason="The account service could not confirm access. Try again later."
+            }
+        } else if let failure=error as? BackupFailure {
+            switch failure {
+            case .unsupported:reason="This saved file could not be decoded into a thumbnail. Your backup remains unchanged."
+            case .sourceChanged:reason="The downloaded bytes did not match the saved version. No preview was created."
+            default:reason="The thumbnail could not be created or saved on this device."
+            }
+        } else {
+            let value=error as NSError
+            if value.domain==NSURLErrorDomain {
+                switch value.code {
+                case NSURLErrorNotConnectedToInternet,NSURLErrorDataNotAllowed:reason="Downloads need an available Wi-Fi connection with Low Data Mode off."
+                case NSURLErrorTimedOut:reason="The request timed out. Retry when your connection is stable."
+                case NSURLErrorNetworkConnectionLost:reason="The connection was interrupted. Tap to retry."
+                default:reason="A network request failed (code \(value.code))."
+                }
+            } else if value.domain==NSCocoaErrorDomain {reason="The device could not read or save the temporary preview file (code \(value.code))."}
+            else {reason="The saved file could not be processed on this device."}
+        }
+        return "Failed while \(step). \(reason)"
+    }
+}
+
 @MainActor final class AcloudPreviewLoader:ObservableObject {
     @Published var data:Data?
     @Published var loading=false
@@ -320,6 +361,8 @@ struct AcloudPreviewPreparer:ResourcePreparer {
     }
     func load(account:UUID,asset:UUID,checksum:String?,download:Bool=false)async {
         guard !loading else{return};let epoch=generation;loading=true;defer{if epoch==generation{loading=false}}
+        var step="checking access"
+        if download {message=nil}
         do {
             if let checksum,!download {
                 let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:checksum)
@@ -327,6 +370,7 @@ struct AcloudPreviewPreparer:ResourcePreparer {
                 return
             }
             let api=try await connection(account:account)
+            step="checking the saved file"
             let proof=try await api.evidence(asset)
             guard proof.id==asset,proof.supported,checksum==nil || checksum==proof.expectedSha256 else{throw RestoreFailure.versionChanged}
             if let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:proof.expectedSha256) {try Task.checkCancellation();guard epoch==generation else{return};data=cached;return}
@@ -336,6 +380,7 @@ struct AcloudPreviewPreparer:ResourcePreparer {
             guard let value=Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String,let origin=URL(string:value) else{throw RestoreFailure.authorization}
             guard !Self.downloadBusy else{message="Another saved preview is loading. Try again when it finishes.";return}
             Self.downloadBusy=true;defer{Self.downloadBusy=false;activeDownload=nil}
+            step="requesting download access"
             let authorization=try await api.authorize(proof)
             guard authorization.evidence==proof else{throw RestoreFailure.versionChanged}
             let directory=FileManager.default.temporaryDirectory.appendingPathComponent("Preview-"+UUID().uuidString,isDirectory:true)
@@ -343,25 +388,21 @@ struct AcloudPreviewPreparer:ResourcePreparer {
             defer{try? FileManager.default.removeItem(at:directory)}
             guard epoch==generation else{return}
             let downloader=try FileRestoreDownloader(origin:origin,allowLocalHTTP:_isDebugAssertConfiguration());activeDownload=downloader
+            step="downloading the saved file"
             try await downloader.download(authorization.authorization,to:files.url(id),expectedSize:proof.expectedSize,progress:{_ in})
+            step="verifying the downloaded file"
             try files.verify(RestoreItem(accountID:account,libraryID:UUID(),evidence:proof,id:id))
+            step="confirming the saved version"
             guard try await api.recheck(proof)==proof else{throw RestoreFailure.versionChanged}
             _=try await connection(account:account);try Task.checkCancellation()
+            step="creating the thumbnail"
             let preview=try await AcloudPreviewStore.shared.capture(file:files.url(id),account:account,asset:asset,checksum:proof.expectedSha256,size:proof.expectedSize,mediaType:proof.mediaType)
             try Task.checkCancellation();guard epoch==generation else{return};data=preview;message=nil
         } catch is CancellationError {return}
         catch {
             guard epoch==generation else{return}
             guard download else{return}
-            if let failure=error as? RestoreFailure {
-                switch failure {
-                case .http(401),.http(403),.authorization,.disabled:message="Preview access is unavailable for this session. Sign in or check test access."
-                case .http(409):message="This saved format cannot load a preview through the current restore access. New backups can capture one locally."
-                case .unsupported:message="A saved thumbnail is not available for this file type or size."
-                case .integrity,.versionChanged:message="The saved file could not be verified. No preview was created."
-                default:message="Preview could not load. Connect to Wi-Fi and retry."
-                }
-            } else {message="Preview could not load. Connect to Wi-Fi and retry."}
+            message=AcloudPreviewFailureMessage.describe(error,step:step)
         }
     }
 }
