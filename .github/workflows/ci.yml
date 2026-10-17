@@ -35,14 +35,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes postgresql-client-17
           echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      - run: npm run storage:configure
       - run: npm run test:integration
       - run: npm run build
-      - run: npm run storage:configure
-      - run: docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage storage-init
+      - id: storage
+        run: docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage storage-init
       - run: npm run test:uploads
       - run: npm run security:scan
       - run: docker compose --env-file .env -f infrastructure/docker/compose.yml stop storage storage-init
-        if: always()
+        if: always() && (steps.storage.outcome == 'success' || steps.storage.outcome == 'failure')
   swift:
     runs-on: macos-latest
     steps:
