@@ -38,6 +38,13 @@ jobs:
       - run: npm run storage:configure
       - run: npm run test:integration
       - run: npm run build
+        env:
+          APP_ENV: staging
+          WEB_ORIGIN: https://web.example.invalid
+          STAFF_ORIGIN: https://staff.example.invalid
+          API_BASE_URL: https://api.example.invalid
+          SECURE_COOKIES: "true"
+          ADMIN_MFA_REQUIRED: "true"
       - id: storage
         run: docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage storage-init
       - run: npm run test:uploads
