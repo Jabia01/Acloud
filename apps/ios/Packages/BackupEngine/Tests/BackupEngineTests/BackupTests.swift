@@ -42,6 +42,20 @@ private actor TestTransport:PartTransport {
  }
  func cancel(item:UUID) {backgroundIDs.remove(item);cancelledIDs.insert(item)}
 }
+private actor HoldingBackgroundTransport:PartTransport {
+ nonisolated let keepsTransfersDuringConnectionLoss=true
+ let api:TestAPI;var started=false;var cancelled=false;var itemID:UUID?
+ private var completion:CheckedContinuation<Void,Error>?
+ init(api:TestAPI){self.api=api}
+ func activeItemIDs()async->Set<UUID>{itemID.map{[$0]} ?? []}
+ func upload(item:UUID,number:Int,resource:PreparedResource,authorization:UploadAuthorization,policy:BackupPolicy)async throws {
+  itemID=item;defer{itemID=nil}
+  try await withCheckedThrowingContinuation{completion=$0;started=true}
+  await api.accept(number,size:resource.sizeBytes)
+ }
+ func release(){let callback=completion;completion=nil;callback?.resume()}
+ func cancel(item:UUID)async{cancelled=true;itemID=nil;let callback=completion;completion=nil;callback?.resume(throwing:CancellationError())}
+}
 private struct WaitingPreparer:ResourcePreparer {
  let denied:Bool
  func prepare(_ item:BackupItem,policy:BackupPolicy,network:NetworkSnapshot) async throws -> PreparedResource{throw denied ? BackupFailure.inaccessible : BackupFailure.waitingForOriginal}
@@ -50,7 +64,7 @@ private struct WaitingPreparer:ResourcePreparer {
 final class BackupEngineTests:XCTestCase {
  fileprivate static func remote(_ id:UUID,status:String,size:Int) throws -> ServerAsset{try asset(id,status:status,size:size)}
  private func directory() throws -> URL {let d=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try FileManager.default.createDirectory(at:d,withIntermediateDirectories:true);addTeardownBlock{try? FileManager.default.removeItem(at:d)};return d}
- private func fixture(bytes:Int=12*1024*1024) async throws -> (SQLiteBackupQueue,BackupCoordinator,TestAPI,TestTransport,BackupItem,ManagedTemporaryFiles,URL) {
+ private func fixture(bytes:Int=12*1024*1024,onProtected:@escaping @Sendable() async->Void={}) async throws -> (SQLiteBackupQueue,BackupCoordinator,TestAPI,TestTransport,BackupItem,ManagedTemporaryFiles,URL) {
   let d=try directory(),source=d.appendingPathComponent("source");try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
   let local=UUID(),url=source.appendingPathComponent(local.uuidString+".bin")
   FileManager.default.createFile(atPath:url.path,contents:nil);let h=try FileHandle(forWritingTo:url)
@@ -58,8 +72,44 @@ final class BackupEngineTests:XCTestCase {
   let files=try ManagedTemporaryFiles(directory:d.appendingPathComponent("temp")),queue=try SQLiteBackupQueue(url:d.appendingPathComponent("queue.sqlite"))
   let api=TestAPI(),transport=TestTransport(api:api),item=BackupItem(libraryID:UUID(),localAssetIdentifier:local.uuidString,mediaType:"test")
   _=try await queue.enqueue(item)
-  let engine=BackupCoordinator(queue:queue,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:source,files:files),files:files)
+  let engine=BackupCoordinator(queue:queue,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:source,files:files),files:files,onProtected:onProtected)
   try await engine.setNetwork(NetworkSnapshot());return(queue,engine,api,transport,item,files,d)
+ }
+ private actor ProtectionEvents {var count=0;func add(){count+=1}}
+ func testBackgroundAlertHookWaitsForServerVerificationAndFiresBeforeWorkerReturns()async throws{
+  let events=ProtectionEvents()
+  let(q,e,api,_,item,_,_)=try await fixture(bytes:100,onProtected:{await events.add()})
+  await api.failVerification(true);do{try await e.run(item.id)}catch{}
+  let unverified=await events.count;XCTAssertEqual(unverified,0)
+  await api.failVerification(false);try await e.retryFailed(item.id);try await e.run(item.id)
+  let verified=await events.count,state=try await q.read(item.id)?.state
+  XCTAssertEqual(verified,1);XCTAssertEqual(state,.protected)
+  try await e.reconcileStartup();let afterRelaunch=await events.count;XCTAssertEqual(afterRelaunch,1)
+ }
+ func testBackgroundDaemonRetainsUploadDuringConnectionLoss()async throws{
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=HoldingBackgroundTransport(api:api)
+  let engine=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await engine.setNetwork(NetworkSnapshot())
+  let running=Task{try await engine.run(item.id)};defer{running.cancel()}
+  for _ in 0..<200{if await transport.started{break};try await Task.sleep(for:.milliseconds(10))}
+  let started=await transport.started;XCTAssertTrue(started)
+  try await engine.setNetwork(NetworkSnapshot(connected:false))
+  let cancelled=await transport.cancelled,state=try await q.read(item.id)?.state
+  XCTAssertFalse(cancelled);XCTAssertEqual(state,.uploading)
+  try await engine.setNetwork(NetworkSnapshot());await transport.release();try await running.value
+  let finished=try await q.read(item.id)?.state;XCTAssertEqual(finished,.protected)
+ }
+ func testBackgroundDaemonStillStopsWhenWiFiPolicyWouldBeViolated()async throws{
+  let(q,_,api,_,item,files,d)=try await fixture(bytes:100),transport=HoldingBackgroundTransport(api:api)
+  let engine=BackupCoordinator(queue:q,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
+  try await engine.setNetwork(NetworkSnapshot())
+  let running=Task{try await engine.run(item.id)};defer{running.cancel()}
+  for _ in 0..<200{if await transport.started{break};try await Task.sleep(for:.milliseconds(10))}
+  let started=await transport.started;XCTAssertTrue(started)
+  try await engine.setNetwork(NetworkSnapshot(connected:true,cellular:true,wifi:false))
+  _=try? await running.value
+  let cancelled=await transport.cancelled,current=try await q.read(item.id)
+  XCTAssertTrue(cancelled);XCTAssertEqual(current?.state,.paused);XCTAssertEqual(current?.lastErrorCode,"NETWORK_POLICY")
  }
  func testStartupPreservesBackgroundTransferAndDoesNotUploadAgain()async throws{
   let(q,e,_,t,item,files,_)=try await fixture(bytes:10)

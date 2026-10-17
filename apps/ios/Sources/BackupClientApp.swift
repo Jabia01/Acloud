@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import UserNotifications
+import BackupEngine
 final class BackgroundTransferDelegate:NSObject,UIApplicationDelegate,UNUserNotificationCenterDelegate {
  func application(_ application:UIApplication,didFinishLaunchingWithOptions launchOptions:[UIApplication.LaunchOptionsKey:Any]?=nil)->Bool {
   UNUserNotificationCenter.current().delegate=self
@@ -20,7 +21,7 @@ final class BackgroundTransferDelegate:NSObject,UIApplicationDelegate,UNUserNoti
   completionHandler()
  }
  func application(_ application:UIApplication,handleEventsForBackgroundURLSession identifier:String,completionHandler:@escaping()->Void){
-  guard identifier == "com.example.backupclient.dev.multipart" else{completionHandler();return}
+  guard identifier == PartURLSessionTransport.sessionIdentifier(bundleIdentifier:Bundle.main.bundleIdentifier ?? "com.example.backupclient.dev") else{completionHandler();return}
   Task{@MainActor in await BackupQueueModel.shared.handleBackground(completion:completionHandler)}
  }
 }

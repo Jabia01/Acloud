@@ -65,9 +65,9 @@ private final class PhotoResourceWriter:@unchecked Sendable {
 import Network
 public final class BackupNetworkMonitor:@unchecked Sendable {
  private let monitor=NWPathMonitor()
- public init(coordinator:BackupCoordinator){monitor.pathUpdateHandler={path in
+ public init(coordinator:BackupCoordinator,onChange:@escaping @Sendable()->Void={}){monitor.pathUpdateHandler={path in
   let value=NetworkSnapshot(connected:path.status == .satisfied,cellular:path.usesInterfaceType(.cellular),wifi:path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet),constrained:path.isConstrained)
-  Task{try? await coordinator.setNetwork(value)}
+  Task{try? await coordinator.setNetwork(value);onChange()}
  };monitor.start(queue:DispatchQueue(label:"backup.network-policy"))}
  deinit{monitor.cancel()}
 }

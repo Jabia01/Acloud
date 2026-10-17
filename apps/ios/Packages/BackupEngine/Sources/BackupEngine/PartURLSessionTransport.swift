@@ -3,24 +3,29 @@ import UploadFoundation
 
 // Persistent system tasks carry opaque queue IDs. Queue never serializes authorization.
 public final class PartURLSessionTransport:NSObject,PartTransport,URLSessionTaskDelegate,@unchecked Sendable {
- private let origin:URL;private let background:Bool;private let cellular:Bool
+ private let origin:URL;private let background:Bool;private let cellular:Bool;private let identifier:String
+ public var keepsTransfersDuringConnectionLoss:Bool {background}
+ public static func sessionIdentifier(bundleIdentifier:String)->String {
+  bundleIdentifier=="com.example.backupclient.dev" ? "com.example.backupclient.dev.multipart" : bundleIdentifier+".multipart"
+ }
  private let lock=NSLock();private var pending:[Int:CheckedContinuation<Void,Error>]=[:]
  private var finishHandler:(@Sendable()->Void)?
  private lazy var session:URLSession={
   let c:URLSessionConfiguration
   #if os(iOS)
-  c=background ? .background(withIdentifier:"com.example.backupclient.dev.multipart") : .ephemeral
+  c=background ? .background(withIdentifier:identifier) : .ephemeral
   c.sessionSendsLaunchEvents=background;c.isDiscretionary=false
   #else
   c = .ephemeral
   #endif
+  c.waitsForConnectivity=background
   c.httpCookieStorage=nil;c.urlCredentialStorage=nil;c.urlCache=nil;c.allowsCellularAccess=cellular
   c.allowsConstrainedNetworkAccess=false;c.allowsExpensiveNetworkAccess=cellular;c.timeoutIntervalForResource=300
   return URLSession(configuration:c,delegate:self,delegateQueue:nil)
  }()
- public init(origin:URL,background:Bool=false,allowsCellular:Bool=false,allowLocalHTTP:Bool=false) throws {
+ public init(origin:URL,background:Bool=false,sessionIdentifier:String="com.example.backupclient.dev.multipart",allowsCellular:Bool=false,allowLocalHTTP:Bool=false) throws {
   guard origin.user==nil,origin.password==nil,origin.query==nil,origin.fragment==nil,origin.scheme=="https" || (allowLocalHTTP && origin.scheme=="http" && (["localhost","127.0.0.1"].contains(origin.host ?? "") || origin.host?.hasSuffix(".local") == true)) else{throw BackupFailure.authorization}
-  self.origin=origin;self.background=background;cellular=allowsCellular;super.init()
+  self.origin=origin;self.background=background;cellular=allowsCellular;identifier=sessionIdentifier;super.init()
  }
  public func reconnect(completion:@escaping @Sendable()->Void){lock.lock();finishHandler=completion;lock.unlock();_=session}
  public func activeItemIDs() async -> Set<UUID> {

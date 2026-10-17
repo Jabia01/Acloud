@@ -12,7 +12,9 @@ public enum SecureStorageError: Error { case unavailable }
 public final class KeychainSessionStore: SessionTokenStore {
     private let service: String
     private let account = "server-session"
-    public init(service: String = "com.example.backupclient.session") { self.service = service }
+    private let allowsBackgroundAccess:Bool
+    public init(service: String = "com.example.backupclient.session",allowsBackgroundAccess:Bool=false) { self.service = service;self.allowsBackgroundAccess=allowsBackgroundAccess }
+    var accessibility:CFString {allowsBackgroundAccess ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly : kSecAttrAccessibleWhenUnlockedThisDeviceOnly}
     private var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service, kSecAttrAccount as String: account,
@@ -27,11 +29,15 @@ public final class KeychainSessionStore: SessionTokenStore {
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = value as? Data,
               let token = String(data: data, encoding: .utf8) else { throw SecureStorageError.unavailable }
+        if allowsBackgroundAccess {
+            // Migrate the existing session while accessible; never copy it to defaults/files.
+            guard SecItemUpdate(self.query as CFDictionary,[kSecAttrAccessible as String:accessibility] as CFDictionary)==errSecSuccess else{throw SecureStorageError.unavailable}
+        }
         return token
     }
     public func save(_ token: String) throws {
         let attributes: [String: Any] = [kSecValueData as String: Data(token.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+            kSecAttrAccessible as String: accessibility]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
             var item = query

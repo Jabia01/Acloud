@@ -9,7 +9,7 @@ enum BetaReleaseSafety {
  guard info["BetaRelease"] as? Bool == true,
        info["EnableFreeUpSpace"] as? Bool != true,
        info["DisposableCleanupContext"] as? Bool != true,
-       info["DevelopmentBackgroundTransfers"] as? Bool != true,
+       info["BackgroundUploadsEnabled"] as? Bool == true,
        info["BetaEnvironment"] as? String == "staging",
        let fingerprint=info["BetaDeploymentFingerprint"] as? String,fingerprint.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil,
        let identifier=Bundle.main.bundleIdentifier,!identifier.hasSuffix(".dev") else{return false}

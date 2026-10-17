@@ -23,7 +23,12 @@ public struct ManagedTemporaryFiles: Sendable {
  private func validate(_ url:URL) throws {
   guard url.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent().path==directory.path else{throw BackupFailure.sourceChanged}
  }
- public func secure(_ url:URL) throws {try validate(url);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)}
+ public func secure(_ url:URL) throws {
+  try validate(url);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+  #if os(iOS)
+  try FileManager.default.setAttributes([.protectionKey:FileProtectionType.completeUntilFirstUserAuthentication],ofItemAtPath:url.path)
+  #endif
+ }
  public func remove(_ url:URL) throws {try validate(url);if FileManager.default.fileExists(atPath:url.path){try FileManager.default.removeItem(at:url)}}
  public func cleanup(_ id:UUID) throws {
   for url in try FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil) where url.lastPathComponent==id.uuidString+".bin" || url.lastPathComponent.hasPrefix(id.uuidString+"-part-") {try remove(url)}

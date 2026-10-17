@@ -1,4 +1,5 @@
 import XCTest
+import Security
 @testable import HealthClient
 
 final class MemoryTokenStore: SessionTokenStore {
@@ -106,4 +107,32 @@ final class AuthAPITests: XCTestCase {
         try keychain.save(raw + "updated"); XCTAssertEqual(try keychain.read(), raw + "updated")
         try keychain.clear(); XCTAssertNil(try keychain.read())
     }
+    func testBackgroundKeychainMigrationRetainsSessionAndDeviceOnlyProtection() throws {
+        let service="foundation.background.test.\(UUID().uuidString)",ordinary=KeychainSessionStore(service:service)
+        defer{try? ordinary.clear()}
+        let token=UUID().uuidString;try ordinary.save(token)
+        #if os(iOS)
+        func protection() throws -> String {
+            let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:"server-session",kSecAttrSynchronizable as String:false,kSecReturnAttributes as String:true]
+            var value:CFTypeRef?;XCTAssertEqual(SecItemCopyMatching(query as CFDictionary,&value),errSecSuccess)
+            return try XCTUnwrap((value as? [String:Any])?[kSecAttrAccessible as String] as? String)
+        }
+        XCTAssertEqual(try protection(),kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+        #endif
+        XCTAssertEqual(ordinary.accessibility as String,kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+        let background=KeychainSessionStore(service:service,allowsBackgroundAccess:true)
+        XCTAssertEqual(try background.read(),token)
+        #if os(iOS)
+        XCTAssertEqual(try protection(),kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+        #endif
+        XCTAssertEqual(background.accessibility as String,kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+        // Ordinary reads never silently downgrade an active background session.
+        XCTAssertEqual(try ordinary.read(),token)
+        #if os(iOS)
+        XCTAssertEqual(try protection(),kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+        #endif
+        XCTAssertEqual(background.accessibility as String,kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+        try background.clear();XCTAssertNil(try ordinary.read())
+    }
+
 }

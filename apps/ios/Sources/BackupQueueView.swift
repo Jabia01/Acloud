@@ -40,12 +40,12 @@ private func backupGuidance(_ item:BackupItem)->String? {
  }
 }
 
-#if DEBUG
 @MainActor private final class BackupBackgroundTime {
  private var identifier:UIBackgroundTaskIdentifier = .invalid
- func begin(){identifier=UIApplication.shared.beginBackgroundTask(withName:"Finish backup step"){[weak self] in self?.end()}}
+ func begin(expiration:(()->Void)?=nil){guard identifier == .invalid else{return};identifier=UIApplication.shared.beginBackgroundTask(withName:"Finish backup step"){[weak self] in expiration?();self?.end()}}
  func end(){guard identifier != .invalid else{return};UIApplication.shared.endBackgroundTask(identifier);identifier = .invalid}
 }
+#if DEBUG
 private struct DevelopmentTestPreparer: ResourcePreparer {
  let generated: GeneratedResourcePreparer
  let photos: PhotoKitResourcePreparer
@@ -96,7 +96,8 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  func connect() async throws {
   guard BetaReleaseSafety.acceptedConfiguration else{throw BackupFailure.missing}
   guard let baseString=Bundle.main.object(forInfoDictionaryKey:"APIBaseURL") as? String,let base=URL(string:baseString) else{throw BackupFailure.missing}
-  let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session")
+  let background=Bundle.main.object(forInfoDictionaryKey:"BackgroundUploadsEnabled") as? Bool ?? false
+  let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session",allowsBackgroundAccess:background)
   let accountAPI=AuthAPI(baseURL:base,store:tokens)
   let account=try await accountAPI.me()
   #if !DEBUG
@@ -134,8 +135,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   #endif
   let lib=UserDefaults.standard.string(forKey:key).flatMap(UUID.init(uuidString:)) ?? UUID();UserDefaults.standard.set(lib.uuidString,forKey:key)
   let storage=URL(string:Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String ?? "http://127.0.0.1:9000")!
-  let background=Bundle.main.object(forInfoDictionaryKey:"DevelopmentBackgroundTransfers") as? Bool ?? false
-  let transfer=try PartURLSessionTransport(origin:storage,background:background,allowLocalHTTP: _isDebugAssertConfiguration())
+  let transfer=try PartURLSessionTransport(origin:storage,background:background,sessionIdentifier:PartURLSessionTransport.sessionIdentifier(bundleIdentifier:Bundle.main.bundleIdentifier ?? "com.example.backupclient.dev"),allowLocalHTTP: _isDebugAssertConfiguration())
   let multipartAPI=try HTTPMultipartAPI(base:base,tokens:tokens,allowLocalHTTP:_isDebugAssertConfiguration());manifestAPI=multipartAPI
   #if DEBUG
   deviceID=boundDevice
@@ -157,8 +157,8 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   let preparer:any ResourcePreparer=PreservationResourcePreparer(ordinary:ordinary,multiple:MultiResourcePreparer(source:PhotoKitMediaSource(),store:store,files:files,binding:binding,invalidate:{id,fingerprint in try? await multipartAPI.invalidateManifest(id,fingerprint:fingerprint)}))
   canSelectOriginals=true
   #endif
-  let e=BackupCoordinator(queue:q,api:multipartAPI,transport:transfer,preparer:AcloudPreviewPreparer(wrapped:preparer,queue:q,files:files),files:files)
-  queue=q;engine=e;transport=transfer;library=lib;accountID=account.id;monitor=BackupNetworkMonitor(coordinator:e)
+  let e=BackupCoordinator(queue:q,api:multipartAPI,transport:transfer,preparer:AcloudPreviewPreparer(wrapped:preparer,queue:q,files:files),files:files,onProtected:{[weak self] in await self?.verifiedInBackground()})
+  queue=q;engine=e;transport=transfer;library=lib;accountID=account.id;monitor=BackupNetworkMonitor(coordinator:e,onChange:{[weak self] in Task{@MainActor in await self?.tick()}})
   if let completion=backgroundCompletion{transfer.reconnect(completion:completion);backgroundCompletion=nil}
   var policy=BackupPolicy();policy.allowICloudOriginals=allowICloudOriginals;try await e.setPolicy(policy)
   alertsSuspended=false
@@ -176,6 +176,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  func refresh() async {
   do{try await connect();if let queue{summary=try await queue.summary();let requestedAnchor=transferAnchor;let page=try await queue.recent(before:requestedAnchor,limit:100);guard transferAnchor?.id==requestedAnchor?.id else{return};items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil};await reconcileManifests();await observeTransferAlerts()}catch{message="Backup connector unavailable. Device acceptance is pending."}
  }
+ func verifiedInBackground() async {await reconcileManifests();await observeTransferAlerts()}
  // Scan the full durable queue, independently of the visible history page.
  private func observeTransferAlerts() async {
   guard !alertsSuspended,!scanningAlerts,let queue,let accountID,let library else{return}
@@ -331,20 +332,23 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  func cancel(_ id:UUID) async{await action{try await self.engine?.cancel(id)}}
  func tick() async {
   do{try await connect();if worker==nil,let engine{worker=Task{
-   #if DEBUG
    let allowance=BackupBackgroundTime();allowance.begin();defer{allowance.end()}
-   #endif
    defer{self.worker=nil};try? await engine.runDue();await self.refresh()}};await refresh()}catch{message="Waiting for account or API access."}
  }
  func stopForSignOut() async throws{AcloudPreviewRegistry.shared.clear();alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;complexBackupTestAvailable=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
  func handleBackground(completion:@escaping @Sendable()->Void) async {
+  let allowance=BackupBackgroundTime()
+  let receipt=BackgroundEventCompletion{Task{@MainActor in allowance.end();completion()}}
+  allowance.begin(expiration:{receipt.finish()})
+  // Never hold UIKit's acknowledgement while a later part waits in the daemon.
+  Task{@MainActor in try? await Task.sleep(for:.seconds(25));receipt.finish()}
   backgroundCompletion={Task{@MainActor in
    // Drain in-process callbacks before reconciling daemon-completed parts.
    await self.worker?.value
    do{try await self.engine?.reconcileStartup();try await self.engine?.runDue();await self.refresh()}catch{self.message="Background upload will resume when the app is opened."}
-   completion()
+   receipt.finish()
   }}
-  do{try await connect();if let pending=backgroundCompletion{transport?.reconnect(completion:pending);backgroundCompletion=nil}}catch{completion();backgroundCompletion=nil}
+  do{try await connect();if let pending=backgroundCompletion{transport?.reconnect(completion:pending);backgroundCompletion=nil}}catch{receipt.finish();backgroundCompletion=nil}
  }
 }
 struct BackupQueueView:View {

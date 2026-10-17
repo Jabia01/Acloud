@@ -15,7 +15,7 @@ swiftc apps/ios/Sources/TransferNotificationPolicy.swift scripts/test/mobile-not
 /tmp/acloud-notification-policy-tests
 ```
 
-Policy regression checks and signed Debug / unsigned Release compilation passed on 2026-10-16. The updated app was installed in place on the paired iPad. The owner confirmed locked-iPad receipt, tap navigation and opt-out on 2026-10-16. Foreground banner receipt after the later implementation still awaits device confirmation.
+Policy regression checks and signed Debug / unsigned Release compilation passed on 2026-10-16. The updated app was installed in place on the paired iPad. The owner confirmed locked-iPad receipt, tap navigation and opt-out on 2026-10-16. The owner subsequently confirmed foreground banners work.
 
 ## Limitations
 
@@ -24,3 +24,5 @@ These are local alerts, not APNs/server push. The app must receive execution tim
 ## Foreground banners
 
 The notification delegate now requests banner, Notification Center list and sound for recognized Acloud events while the app is foregrounded. It rechecks the app opt-in at presentation time and requires an active matching transfer scope; unknown events or stale signed-out scopes are suppressed. Test notifications require an explicit current test request, cleared on sign-out/opt-out. iOS permission, Focus and sound settings still control presentation. No historic completion replay is introduced. Updated policy regressions and signed Debug/unsigned Release builds passed on 2026-10-16.
+
+17 October: the backup coordinator now invokes notification observation immediately after durable server protection is recorded, including during background execution. Background uploads are enabled in Debug and Beta Release; this does not add APNs/server push. Locked-screen completion receipt with this update remains pending physical confirmation. See [BACKGROUND_UPLOADS.md](BACKGROUND_UPLOADS.md).

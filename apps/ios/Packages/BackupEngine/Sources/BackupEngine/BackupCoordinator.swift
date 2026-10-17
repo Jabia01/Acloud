@@ -7,15 +7,17 @@ public actor BackupCoordinator {
  private let transport:any PartTransport
  private let preparer:any ResourcePreparer
  private let files:ManagedTemporaryFiles
+ private let onProtected:@Sendable() async->Void
  private let retry:RetryPolicy
  private var policy:BackupPolicy
  private var network=NetworkSnapshot(connected:false)
  private var active:[UUID:Task<Void,Error>]=[:]
- public init(queue:SQLiteBackupQueue,api:any MultipartAPI,transport:any PartTransport,preparer:any ResourcePreparer,files:ManagedTemporaryFiles,policy:BackupPolicy=BackupPolicy(),retry:RetryPolicy=RetryPolicy()) {
-  self.queue=queue;self.api=api;self.transport=transport;self.preparer=preparer;self.files=files;self.policy=policy;self.retry=retry
+ public init(queue:SQLiteBackupQueue,api:any MultipartAPI,transport:any PartTransport,preparer:any ResourcePreparer,files:ManagedTemporaryFiles,policy:BackupPolicy=BackupPolicy(),retry:RetryPolicy=RetryPolicy(),onProtected:@escaping @Sendable() async->Void={}) {
+  self.queue=queue;self.api=api;self.transport=transport;self.preparer=preparer;self.files=files;self.policy=policy;self.retry=retry;self.onProtected=onProtected
  }
  public func setNetwork(_ value:NetworkSnapshot) async throws {
   network=value
+  if !value.connected,transport.keepsTransfersDuringConnectionLoss{return}
   for id in Array(active.keys){if let item=try await queue.read(id),item.state != .paused,!policy.permits(item,network:value){try await pause(id,reason:"NETWORK_POLICY")}}
  }
  public func setPolicy(_ value:BackupPolicy) async throws {policy=value;try await setNetwork(network)}
@@ -44,7 +46,7 @@ public actor BackupCoordinator {
    originalProof=verified;manifest.cloudAssetID=verified.id;manifest.verificationID=verified.verificationId;item.originalManifest=manifest
   }
   if item.mediaResourceBinding != nil{guard let verified=try await api.integrity(assetID),verified.id==assetID,verified.checksum==item.expectedChecksum,verified.sizeBytes==item.expectedSizeBytes else{throw BackupFailure.sourceChanged};originalProof=verified}
-  _=try await queue.protect(item,proof:asset,integrity:originalProof);try await preparer.cleanup(item);return true
+  _=try await queue.protect(item,proof:asset,integrity:originalProof);await onProtected();try await preparer.cleanup(item);return true
  }
  private func execute(_ id:UUID) async throws {
   guard var item=try await queue.read(id) else{throw BackupFailure.missing}

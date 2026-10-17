@@ -75,7 +75,7 @@ targets:
         DevelopmentSinglePhotoRestore: true
         DevelopmentSinglePhotoBackup: true
         DevelopmentComplexMediaBackup: true
-        DevelopmentBackgroundTransfers: true
+        BackgroundUploadsEnabled: true
         EnableFreeUpSpace: false
         DisposableCleanupContext: false
         UILaunchScreen: {}

@@ -134,6 +134,7 @@ public protocol MultipartAPI: Sendable {
 }
 public extension MultipartAPI{func integrity(_ id:UUID) async throws -> OriginalServerProof?{nil}}
 public protocol PartTransport: Sendable {
+ var keepsTransfersDuringConnectionLoss:Bool {get}
  func upload(item: UUID, number: Int, resource: PreparedResource, authorization: UploadAuthorization, policy: BackupPolicy) async throws
  func cancel(item: UUID) async
  func activeItemIDs() async -> Set<UUID>
@@ -159,3 +160,5 @@ public extension BackupFailure {
   }
  }
 }
+
+public extension PartTransport {var keepsTransfersDuringConnectionLoss:Bool {false}}
