@@ -386,11 +386,13 @@ struct BackupQueueView:View {
   NavigationStack {
    List {
     Section {
+     AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Make room for memories.",message:"Choose what to back up. We check each stored file before marking it protected. Keep your originals during beta.").acloudFeatureRow()
+    }
+    Section {
      Picker("Browse backups",selection:$browserMode){Text("Gallery").tag("gallery");Text("Transfers").tag("transfers")}.pickerStyle(.segmented)
     }
     if browserMode == "transfers" {
     Section {
-     AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Make room for memories.",message:"Choose what to back up. We check each stored file before marking it protected. Keep your originals during beta.").acloudFeatureRow()
      LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
       AcloudMetric(title:"Verified files",value:protectedCount.formatted(),icon:"checkmark.shield")
       AcloudMetric(title:"Queued or in progress",value:waitingCount.formatted(),icon:"arrow.triangle.2.circlepath")

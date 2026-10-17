@@ -156,6 +156,7 @@ struct DiscoveryView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment:.leading,spacing:18) {
+                    AcloudHero(icon:"photo.on.rectangle",eyebrow:"On your device",title:"Your library. Your choice.",message:"See the photos and videos you allow Acloud to access. Scanning your library never uploads or deletes an original.")
                     HStack {
                         VStack(alignment:.leading,spacing:4) {
                             Text("On this device").font(.title2.bold())

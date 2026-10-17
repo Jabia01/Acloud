@@ -198,6 +198,9 @@ struct RestoreView:View {
   NavigationStack {
    List {
     Section {
+     AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Back to your Photos.",message:"Select a verified backup to save a new copy to your device. Your cloud backup stays protected.").acloudFeatureRow()
+    }
+    Section {
      Text("Save a new copy to Photos. Your cloud backup stays unchanged; restored items may sync to iCloud.").font(.subheadline).foregroundStyle(.secondary)
      Text(model.message).font(.caption).foregroundStyle(.secondary)
      if PHPhotoLibrary.authorizationStatus(for:.addOnly) != .authorized && ![PHAuthorizationStatus.authorized,.limited].contains(PHPhotoLibrary.authorizationStatus(for:.readWrite)) {
