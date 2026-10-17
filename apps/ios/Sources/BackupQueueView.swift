@@ -303,9 +303,12 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   guard let page=try? await store.page(binding:binding,after:manifestReconcileCursor,limit:50) else{return}
   manifestReconcileCursor=page.count==50 ? page.last?.id:nil
   for manifest in page{
-   if let pending=manifest.changedFingerprint{try? await api.invalidateManifest(manifest.id,fingerprint:pending)}
-   if let fresh=try? await PhotoKitMediaSource().snapshot(manifest.source.localID),!manifest.matches(fresh){try? await api.invalidateManifest(manifest.id,fingerprint:fresh.fingerprint);if var current=try? await store.read(manifest.id){current.state = .sourceChanged;current.changedFingerprint=fresh.fingerprint;_=try? await store.save(current)}}
-   if let proof=try? await api.manifestProof(manifest.id){_=try? await store.apply(proof,to:manifest.id)}
+   // Reconcile server verification first: a finished saved version no longer follows device edits.
+   guard let proof=try? await api.manifestProof(manifest.id),let current=try? await store.apply(proof,to:manifest.id) else{continue}
+   guard current.requiresSourceRevalidation else{continue}
+   if let pending=current.changedFingerprint{try? await api.invalidateManifest(current.id,fingerprint:pending)}
+   if let fresh=try? await PhotoKitMediaSource().snapshot(current.source.localID),!current.matches(fresh){try? await api.invalidateManifest(current.id,fingerprint:fresh.fingerprint)}
+   if let proof=try? await api.manifestProof(current.id){_=try? await store.apply(proof,to:current.id)}
   }
   manifests=(try? await store.page(binding:binding,limit:50)) ?? []
  }

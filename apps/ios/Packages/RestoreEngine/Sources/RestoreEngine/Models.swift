@@ -5,6 +5,7 @@ public enum RestoreFailure:Error,Equatable{case authorization,disabled,versionCh
 public struct RestoreEvidence:Codable,Equatable,Sendable {
  public let id:UUID,cloudVersionId:String,mediaType:String,expectedSize:Int,expectedSha256:String,resourcePolicy:String
  public init(id:UUID,cloudVersionId:String,mediaType:String,expectedSize:Int,expectedSha256:String,resourcePolicy:String="SINGLE_PROTECTED_RESOURCE"){self.id=id;self.cloudVersionId=cloudVersionId;self.mediaType=mediaType;self.expectedSize=expectedSize;self.expectedSha256=expectedSha256;self.resourcePolicy=resourcePolicy}
+ public var previewSupported:Bool{resourcePolicy=="VERIFIED_PREVIEW_RESOURCE" && ["image","video"].contains(mediaType) && expectedSize>0 && expectedSize<=32*1024*1024 && [cloudVersionId,expectedSha256].allSatisfy{$0.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil}}
  public var supported:Bool{resourcePolicy=="SINGLE_PROTECTED_RESOURCE" && ["image","video"].contains(mediaType) && expectedSize>0 && expectedSize<=10*1024*1024*1024 && [cloudVersionId,expectedSha256].allSatisfy{$0.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil}}
 }
 public struct RestoreItem:Codable,Identifiable,Sendable {

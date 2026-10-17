@@ -66,6 +66,13 @@ final class RestoreTests:RestoreTestBase{
  func testDeniedPermissionRetainsVerifiedFile()async throws{let f=try await fixture();await f.photos.configure(allowed:false);await expectFailure{try await f.engine.run(f.item.id)};try await assertState(f,.paused);XCTAssertTrue(FileManager.default.fileExists(atPath:f.files.url(f.item.id).path))}
  func testInsufficientStoragePausesBeforeNetwork()async throws{let f=try await fixture(capacity:1);try await f.engine.run(f.item.id);try await assertState(f,.paused);let calls=await f.api.authorizations;XCTAssertEqual(calls,0)}
  func testUnknownCapacityIsNotAbsoluteDenial()async throws{let f=try await fixture(capacity:nil);try await f.engine.run(f.item.id);try await assertState(f,.restored)}
+ func testPreviewProofCannotEnterPhotosRestoreQueue()async throws {
+  let f=try await fixture();let e=RestoreEvidence(id:UUID(),cloudVersionId:f.item.evidence.cloudVersionId,mediaType:"image",expectedSize:100,expectedSha256:f.item.evidence.expectedSha256,resourcePolicy:"VERIFIED_PREVIEW_RESOURCE")
+  XCTAssertTrue(e.previewSupported);XCTAssertFalse(e.supported)
+  await expectFailure{try await f.queue.enqueue(RestoreItem(accountID:f.item.accountID,libraryID:f.item.libraryID,evidence:e))}
+  let oversized=RestoreEvidence(id:e.id,cloudVersionId:e.cloudVersionId,mediaType:e.mediaType,expectedSize:32*1024*1024+1,expectedSha256:e.expectedSha256,resourcePolicy:e.resourcePolicy)
+  XCTAssertFalse(oversized.previewSupported)
+ }
  func testPartialLivePhotoIsUnsupported()async throws{let f=try await fixture();let e=RestoreEvidence(id:UUID(),cloudVersionId:f.item.evidence.cloudVersionId,mediaType:"image",expectedSize:100,expectedSha256:f.item.evidence.expectedSha256,resourcePolicy:"LIVE_PHOTO_PARTIAL");await expectFailure{try await f.queue.enqueue(RestoreItem(accountID:f.item.accountID,libraryID:f.item.libraryID,evidence:e))}}
  func testRawPartialIsUnsupported()async throws{let f=try await fixture();let e=RestoreEvidence(id:UUID(),cloudVersionId:f.item.evidence.cloudVersionId,mediaType:"raw",expectedSize:100,expectedSha256:f.item.evidence.expectedSha256);await expectFailure{try await f.queue.enqueue(RestoreItem(accountID:f.item.accountID,libraryID:f.item.libraryID,evidence:e))}}
  func testSidecarBundleIsUnsupported()async throws{let f=try await fixture();let e=RestoreEvidence(id:UUID(),cloudVersionId:f.item.evidence.cloudVersionId,mediaType:"image",expectedSize:100,expectedSha256:f.item.evidence.expectedSha256,resourcePolicy:"MULTI_RESOURCE");XCTAssertFalse(e.supported)}

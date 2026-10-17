@@ -13,6 +13,17 @@ final class ManifestTests:XCTestCase{
  func testMissingPairedBytesIncomplete(){var m=captured(manifest([1,9],live:true));m.resources[1].expectedSha256=nil;XCTAssertFalse(m.completeLocal)}
  func testRawRole(){let m=manifest([1],utis:["com.adobe.raw-image"]);XCTAssertEqual(m.source.kind,.raw);XCTAssertEqual(m.resources[0].descriptor.role,.raw)}
  func testRawJPEGRequiresBoth(){var m=captured(manifest([1,4],utis:["com.adobe.raw-image","public.jpeg"]));XCTAssertEqual(m.source.kind,.rawJPEG);m.resources[1].expectedSize=nil;XCTAssertFalse(m.completeLocal)}
+ func testFinishedEditedBackupDoesNotFollowLaterDeviceEdits()async throws {
+  let db=try store(),base=manifest([1,5,7]);try await db.insert(base)
+  let m=try await db.save(captured(base))
+  XCTAssertTrue(m.requiresSourceRevalidation)
+  let saved=try await db.apply(proof(m),to:m.id)
+  XCTAssertFalse(saved.requiresSourceRevalidation)
+  XCTAssertFalse(saved.matches(source([1,5,7],modification:Date(timeIntervalSince1970:200))))
+  let stored=try await db.read(m.id)
+  XCTAssertEqual(stored?.source.fingerprint,saved.source.fingerprint)
+  XCTAssertEqual(stored?.resources.map(\.expectedSha256),saved.resources.map(\.expectedSha256))
+ }
  func testEditedPolicyPreservesOriginalRenderedAdjustment(){let m=manifest([1,5,7]);XCTAssertEqual(m.source.kind,.edited);XCTAssertEqual(m.required.count,3);XCTAssertTrue(m.source.shapeComplete)}
  func testMissingAdjustmentFailsFidelity(){XCTAssertFalse(manifest([1,5]).source.shapeComplete)}
  func testAdjustmentIsRequired(){XCTAssertTrue(ResourceDescriptor(ordinal:0,resourceType:7,uti:"public.data").required)}

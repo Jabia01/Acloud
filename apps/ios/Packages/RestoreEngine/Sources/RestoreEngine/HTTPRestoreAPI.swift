@@ -15,6 +15,9 @@ public actor HTTPRestoreAPI:RestoreAPI,CompoundRestoreAPI{
  public func evidence(_ id:UUID)async throws->RestoreEvidence{try await request("restore/assets/\(id)")}
  public func authorize(_ evidence:RestoreEvidence)async throws->RestoreAuthorization{try await request("restore/assets/\(evidence.id)/authorize",method:"POST",body:["cloudVersionId":evidence.cloudVersionId])}
  public func recheck(_ evidence:RestoreEvidence)async throws->RestoreEvidence{try await request("restore/assets/\(evidence.id)/recheck",method:"POST",body:["cloudVersionId":evidence.cloudVersionId])}
+ public func previewEvidence(_ id:UUID)async throws->RestoreEvidence{try await request("restore/assets/\(id)/preview")}
+ public func previewAuthorize(_ evidence:RestoreEvidence)async throws->RestoreAuthorization{try await request("restore/assets/\(evidence.id)/preview/authorize",method:"POST",body:["cloudVersionId":evidence.cloudVersionId])}
+ public func previewRecheck(_ evidence:RestoreEvidence)async throws->RestoreEvidence{try await request("restore/assets/\(evidence.id)/preview/recheck",method:"POST",body:["cloudVersionId":evidence.cloudVersionId])}
  public func report(_ code:String,retry:Int,durationMs:Int?)async{struct Receipt:Decodable{let recorded:Bool};var body:[String:Any]=["code":code,"retryCount":retry];if let durationMs{body["durationMs"]=durationMs};let _:Receipt?=try? await request("restore/events",method:"POST",body:body)}
  public func inventory(cursor:String?=nil)async throws->ProtectedRestorePage{var query=[URLQueryItem(name:"limit",value:"50")];if let cursor{query.append(URLQueryItem(name:"cursor",value:cursor))};return try await request("assets",query:query)}
  public func manifestForAsset(_ id:UUID)async throws->ServerManifestProof?{try await request("media-manifests/for-asset/\(id)")}

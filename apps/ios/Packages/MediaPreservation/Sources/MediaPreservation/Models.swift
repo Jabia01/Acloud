@@ -26,6 +26,9 @@ public struct ManifestResource:Codable,Equatable,Identifiable,Sendable{
  public var captured:Bool{guard let size=expectedSize,let sha=expectedSha256 else{return false};return size>0&&size<=10*1024*1024*1024&&sha.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil}
 }
 public struct MediaManifest:Codable,Equatable,Identifiable,Sendable{
+ // Protected cloud versions are immutable; only unfinished captures follow the device source.
+ public var requiresSourceRevalidation:Bool{![ManifestState.fullyProtected,.restoreReady].contains(state)}
+
  public let id:UUID,manifestVersion:Int,binding:ManifestBinding,sourceToken:UUID,source:MediaSourceSnapshot,createdAt:Date
  public var resources:[ManifestResource],state:ManifestState = .discovered,revision=0,updatedAt=Date(),serverFingerprint:String?,changedFingerprint:String?
  public init(id:UUID=UUID(),binding:ManifestBinding,sourceToken:UUID=UUID(),source:MediaSourceSnapshot,manifestVersion:Int=1){self.id=id;self.manifestVersion=manifestVersion;self.binding=binding;self.sourceToken=sourceToken;self.source=source;createdAt=Date();resources=source.resources.map{ManifestResource(descriptor:$0)};if !source.shapeComplete{state = .unsupported}}

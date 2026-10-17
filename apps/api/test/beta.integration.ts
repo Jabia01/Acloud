@@ -128,4 +128,25 @@ describe('ACL011 generated isolated beta workflows',{concurrency:false},()=>{
  test('ACL014 manifest ID cannot change captured source dimensions',async()=>{const b=await made();await assert.rejects(media.create(user.p,{...b,pixelWidth:20}));});
  test('ACL014 complex flag alone cannot bypass physical format acceptance',async()=>{const b=await made();await protectedResource(b,0);await protectedResource(b,1);await gates([...admissionGates.RESTORE]);process.env.RESTORE_ENABLED='true';process.env.COMPLEX_PHOTOS_RESTORE_ENABLED='true';const p=await media.get(user.p,b.id);await assert.rejects(media.restorePlan(user.p,b.id,{manifestFingerprint:p.manifestFingerprint,choice:'ALL'}));});
  test('ACL014 generated audited format gates return all paired versions',async()=>{const b=await made();await protectedResource(b,0);await protectedResource(b,1);await gates([...admissionGates.RESTORE,'COMPLETE_MANIFEST','COMPLEX_PHOTOKIT_RESTORE','LIVE_PHOTO_FIDELITY']);process.env.RESTORE_ENABLED='true';process.env.COMPLEX_PHOTOS_RESTORE_ENABLED='true';const p=await media.get(user.p,b.id);const plan=await media.restorePlan(user.p,b.id,{manifestFingerprint:p.manifestFingerprint,choice:'ALL'});assert.equal(plan.resources.length,2);assert.ok(plan.resources.every(r=>r.cloudVersionId&&r.evidence.expectedSha256===r.expectedSha256));await assert.rejects(media.restorePlan(user.p,b.id,{manifestFingerprint:p.manifestFingerprint,choice:'ORIGINAL'}));});
+ for(const [kind,types,displayIndex] of [['LIVE_PHOTO',[1,9],0],['EDITED',[1,5,7],1]] as const)test('verified preview HTTP route for '+kind+' retains complete preservation and restore gates',async()=>{
+  const b=await made(kind,[...types]);const uploaded=[];for(let i=0;i<types.length;i++)uploaded.push(await protectedResource(b,i));
+  await gates([...admissionGates.RESTORE]);process.env.RESTORE_ENABLED='true';process.env.COMPLEX_PHOTOS_RESTORE_ENABLED='false';
+  const id=uploaded[displayIndex].assetId,url='/restore/assets/'+id+'/preview';
+  const snapshot=async()=>({assets:(await pool.query('SELECT * FROM assets WHERE user_id=$1 ORDER BY id',[user.id])).rows,resources:(await pool.query('SELECT * FROM media_manifest_resources WHERE manifest_id=$1 ORDER BY ordinal',[b.id])).rows,quota:(await pool.query('SELECT * FROM development_entitlements WHERE user_id=$1',[user.id])).rows});
+  const before=await snapshot();const proof=await request(app.getHttpServer()).get(url).set('Authorization','Bearer '+user.token).expect(200);
+  assert.equal(proof.body.resourcePolicy,'VERIFIED_PREVIEW_RESOURCE');assert.equal(proof.headers['cache-control'],'no-store');
+  const body={cloudVersionId:proof.body.cloudVersionId};await post(url+'/authorize',body).expect(200);await post(url+'/recheck',body).expect(200);
+  await request(app.getHttpServer()).get('/restore/assets/'+id).set('Authorization','Bearer '+user.token).expect(409);
+  await request(app.getHttpServer()).get(url).expect(401);await request(app.getHttpServer()).get(url).set('Authorization','Bearer '+other.token).expect(404);
+  await post(url+'/authorize',{...body,bucket:'injected'}).expect(400);await post(url+'/authorize',{cloudVersionId:'0'.repeat(64)}).expect(409);
+  assert.deepEqual(await snapshot(),before,'preview never mutates original/edit bytes, resources or quota');
+  assert.deepEqual(await media.invalidate(user.p,b.id,{sourceFingerprint:digest('later device edit')}),{state:'FULLY_PROTECTED'});
+  assert.deepEqual(await snapshot(),before,'later source edit never invalidates a finished saved version');
+  await post(url+'/recheck',body).expect(200);
+  const forbidden=uploaded[kind==='LIVE_PHOTO'?1:2].assetId;await request(app.getHttpServer()).get('/restore/assets/'+forbidden+'/preview').set('Authorization','Bearer '+user.token).expect(409);
+  await pool.query("UPDATE asset_verifications SET verification_status='FAILED',verified_at=NULL WHERE asset_id=$1",[forbidden]);await post(url+'/recheck',body).expect(409);
+  await pool.query("UPDATE asset_verifications SET verification_status='SUCCEEDED',verified_at=now() WHERE asset_id=$1",[forbidden]);
+  await pool.query('UPDATE media_manifests SET source_changed=true WHERE id=$1',[b.id]);await post(url+'/authorize',body).expect(409);
+ });
+
 });

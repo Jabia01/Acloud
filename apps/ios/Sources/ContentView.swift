@@ -311,7 +311,7 @@ enum AcloudPreviewFailureMessage {
         if let failure=error as? RestoreFailure {
             switch failure {
             case .http(401),.http(403),.authorization,.disabled:reason="Preview access was refused. Sign in again or check test access."
-            case .http(409):reason="This saved format requires complete-media restore access before a preview can load."
+            case .http(409):reason="This saved item is incomplete, has changed, or is not eligible for a thumbnail."
             case .http(let status):reason="The server returned HTTP \(status). Try again later."
             case .unsupported:reason="A thumbnail is unavailable for this file type or size."
             case .integrity,.versionChanged:reason="The saved file could not be verified. No preview was created."
@@ -371,8 +371,8 @@ enum AcloudPreviewFailureMessage {
             }
             let api=try await connection(account:account)
             step="checking the saved file"
-            let proof=try await api.evidence(asset)
-            guard proof.id==asset,proof.supported,checksum==nil || checksum==proof.expectedSha256 else{throw RestoreFailure.versionChanged}
+            let proof=try await api.previewEvidence(asset)
+            guard proof.id==asset,proof.previewSupported,checksum==nil || checksum==proof.expectedSha256 else{throw RestoreFailure.versionChanged}
             if let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:proof.expectedSha256) {try Task.checkCancellation();guard epoch==generation else{return};data=cached;return}
             guard download else{return}
             guard epoch==generation else{return}
@@ -381,7 +381,7 @@ enum AcloudPreviewFailureMessage {
             guard !Self.downloadBusy else{message="Another saved preview is loading. Try again when it finishes.";return}
             Self.downloadBusy=true;defer{Self.downloadBusy=false;activeDownload=nil}
             step="requesting download access"
-            let authorization=try await api.authorize(proof)
+            let authorization=try await api.previewAuthorize(proof)
             guard authorization.evidence==proof else{throw RestoreFailure.versionChanged}
             let directory=FileManager.default.temporaryDirectory.appendingPathComponent("Preview-"+UUID().uuidString,isDirectory:true)
             let files=try RestoreFiles(directory:directory),id=UUID()
@@ -393,7 +393,7 @@ enum AcloudPreviewFailureMessage {
             step="verifying the downloaded file"
             try files.verify(RestoreItem(accountID:account,libraryID:UUID(),evidence:proof,id:id))
             step="confirming the saved version"
-            guard try await api.recheck(proof)==proof else{throw RestoreFailure.versionChanged}
+            guard try await api.previewRecheck(proof)==proof else{throw RestoreFailure.versionChanged}
             _=try await connection(account:account);try Task.checkCancellation()
             step="creating the thumbnail"
             let preview=try await AcloudPreviewStore.shared.capture(file:files.url(id),account:account,asset:asset,checksum:proof.expectedSha256,size:proof.expectedSize,mediaType:proof.mediaType)

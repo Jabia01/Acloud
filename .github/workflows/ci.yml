@@ -43,6 +43,12 @@ jobs:
         working-directory: apps/ios/Packages/PhotoDiscovery
       - run: swift test
         working-directory: apps/ios/Packages/UploadFoundation
+      - run: swift test
+        working-directory: apps/ios/Packages/MediaPreservation
+      - run: swift test
+        working-directory: apps/ios/Packages/BackupEngine
+      - run: swift test
+        working-directory: apps/ios/Packages/RestoreEngine
       - run: brew install xcodegen
       - run: xcodegen generate
         working-directory: apps/ios

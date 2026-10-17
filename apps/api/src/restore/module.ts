@@ -5,6 +5,9 @@ import {Module,Controller,Get,Post,Req,Param,Body,Inject,UseGuards,UseIntercepto
  @Get('assets/:id')evidence(@Req()r:AuthRequest,@Param('id')id:string){return this.restore.evidence(r.principal,uuid(id));}
  @Post('assets/:id/authorize')@HttpCode(200)authorize(@Req()r:AuthRequest,@Param('id')id:string,@Body()b:unknown){return this.restore.authorize(r.principal,uuid(id),b);}
  @Post('assets/:id/recheck')@HttpCode(200)recheck(@Req()r:AuthRequest,@Param('id')id:string,@Body()b:unknown){return this.restore.recheck(r.principal,uuid(id),b);}
+ @Get('assets/:id/preview')previewEvidence(@Req()r:AuthRequest,@Param('id')id:string){return this.restore.previewEvidence(r.principal,uuid(id));}
+ @Post('assets/:id/preview/authorize')@HttpCode(200)previewAuthorize(@Req()r:AuthRequest,@Param('id')id:string,@Body()b:unknown){return this.restore.previewAuthorize(r.principal,uuid(id),b);}
+ @Post('assets/:id/preview/recheck')@HttpCode(200)previewRecheck(@Req()r:AuthRequest,@Param('id')id:string,@Body()b:unknown){return this.restore.previewRecheck(r.principal,uuid(id),b);}
  @Post('events')@HttpCode(202)event(@Req()r:AuthRequest,@Body()b:unknown){return this.restore.event(r.principal,b);}
 }
 @Module({imports:[AuthModule,UploadModule],controllers:[RestoreController],providers:[DatabaseService,RestoreService],exports:[RestoreService]})export class RestoreModule{}
