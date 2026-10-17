@@ -56,7 +56,10 @@ jobs:
           SECURE_COOKIES: "true"
           ADMIN_MFA_REQUIRED: "true"
       - id: storage
-        run: docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage storage-init
+        name: Start private test storage
+        run: |
+          docker compose --env-file .env -f infrastructure/docker/compose.yml up -d --build --wait --wait-timeout 60 storage
+          docker compose --env-file .env -f infrastructure/docker/compose.yml run --rm --no-deps storage-init
       - run: npm run test:uploads
         env:
           NODE_ENV: test
