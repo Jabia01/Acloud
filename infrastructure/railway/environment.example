@@ -88,3 +88,8 @@ RAILWAY_VOLUME_MOUNT_PATH=/data
 # Persistent directories must already be owned by UID 1000; do not run app as root.
 LIFECYCLE_LEDGER_DIR=/data/ledger
 AUDIT_ARCHIVE_DIR=/data/audit
+
+# Optional, time-limited staging owner console preview; keep disabled by default.
+STAFF_OWNER_READ_ONLY_ENABLED=false
+STAFF_OWNER_READ_ONLY_ADMIN_ID=
+STAFF_OWNER_READ_ONLY_EXPIRES_AT=

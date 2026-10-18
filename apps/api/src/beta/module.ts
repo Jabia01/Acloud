@@ -1,10 +1,11 @@
+import {ownerReadOnlyConfiguration,allowOwnerReadOnlyRequest} from '../admin/owner-read-only';
 import {ownerTestConfigured} from './owner-test';
 import {UploadModule} from '../uploads/upload.module';
 import {BetaErrorReporter,ErrorSink,PendingErrorSink} from './errors';
 import {Body,Controller,Get,Global,Inject,Module,Param,Post,Req,UseGuards,UseInterceptors,HttpCode,CanActivate,ExecutionContext,Injectable,ForbiddenException} from '@nestjs/common';import {APP_GUARD} from '@nestjs/core';import {createHash} from 'node:crypto';import {DatabaseService} from '../database.service';import {AuthModule} from '../auth/auth.module';import {SessionGuard,type AuthRequest} from '../auth/session.guard';import {AuthNoStore} from '../auth/safe-errors';import {AdminModule} from '../admin/module';import {AdminGuard,type AdminRequest} from '../admin/guard';import {PasswordService} from '../auth/password.service';import {BetaPolicy} from './policy';import {BetaService} from './service';import {betaConfiguration,supportedVersion} from './config';
 @Injectable()export class BetaRequestGuard implements CanActivate{
  constructor(@Inject(BetaPolicy)private policy:BetaPolicy,@Inject(DatabaseService)private db:DatabaseService){}
- async canActivate(ctx:ExecutionContext){const cfg=betaConfiguration();const r=ctx.switchToHttp().getRequest(),method=r.method as string;let path:string;try{path=decodeURIComponent(String(r.path)).toLowerCase().replace(/\/+$/,'')||'/';}catch{throw new ForbiddenException();}if(!cfg.enabled){if(process.env.NODE_ENV==='production'&&process.env.APP_ENV==='staging'){if(method==='POST'&&path.startsWith('/uploads')){
+ async canActivate(ctx:ExecutionContext){const cfg=betaConfiguration();const r=ctx.switchToHttp().getRequest(),method=r.method as string;let path:string;try{path=decodeURIComponent(String(r.path)).toLowerCase().replace(/\/+$/,'')||'/';}catch{throw new ForbiddenException();}if(path.startsWith('/internal/')){const owner=ownerReadOnlyConfiguration();if(owner){await allowOwnerReadOnlyRequest(this.db,r,method,path,owner);return true;}}if(!cfg.enabled){if(process.env.NODE_ENV==='production'&&process.env.APP_ENV==='staging'){if(method==='POST'&&path.startsWith('/uploads')){
  if(!ownerTestConfigured())throw new ForbiddenException('Beta backup disabled');
  const auth=r.headers.authorization;
  if(typeof auth!=='string'||!/^Bearer [A-Za-z0-9_-]{43}$/.test(auth))throw new ForbiddenException();
