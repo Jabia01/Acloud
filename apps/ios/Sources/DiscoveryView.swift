@@ -271,6 +271,7 @@ struct AcloudGalleryEntry:Identifiable,Sendable {
     var duration:Double?=nil
     var live=false
     var localID:String?=nil
+    var revision:Date?=nil
     var account:UUID?=nil
     var asset:UUID?=nil
     var checksum:String?=nil
@@ -342,7 +343,7 @@ private struct AcloudGalleryTile:View {
             ZStack {
                 Rectangle().fill(AcloudStyle.accent.opacity(0.10))
                 Image(systemName:entry.type == "video" ? "video.fill":"photo.fill").foregroundStyle(AcloudStyle.accent).font(.title)
-                if let local=entry.localID {AcloudLocalThumbnail(localID:local,captureDate:$capturedAt).frame(width:geometry.size.width,height:geometry.size.width).id(local)}
+                if let local=entry.localID {AcloudLocalThumbnail(localID:local,captureDate:$capturedAt,revision:entry.revision).frame(width:geometry.size.width,height:geometry.size.width).id(local)}
                 else if let account=entry.account,let asset=entry.asset {AcloudGallerySavedImage(account:account,asset:asset,checksum:entry.checksum,side:geometry.size.width)}
                 VStack {
                     HStack {Spacer();if selecting {Image(systemName:selected ? "checkmark.circle.fill":"circle").font(.title2).foregroundStyle(.white).padding(3).background(selected ? AcloudStyle.accent:Color.black.opacity(0.3),in:Circle()).padding(6)}}
@@ -488,7 +489,7 @@ private actor AcloudDeviceGalleryStore {
         guard let result,offset>=0,offset<result.count else{return([],result?.count ?? 0)}
         let items=(offset..<min(offset+max(200,limit),result.count)).map {index in
             let asset=result.object(at:index)
-            return AcloudGalleryEntry(id:asset.localIdentifier,type:asset.mediaType == .video ? "video":"image",date:asset.creationDate,duration:asset.mediaType == .video ? asset.duration:nil,live:asset.mediaSubtypes.contains(.photoLive),localID:asset.localIdentifier)
+            return AcloudGalleryEntry(id:asset.localIdentifier,type:asset.mediaType == .video ? "video":"image",date:asset.creationDate,duration:asset.mediaType == .video ? asset.duration:nil,live:asset.mediaSubtypes.contains(.photoLive),localID:asset.localIdentifier,revision:asset.modificationDate)
         }
         return(items,result.count)
     }

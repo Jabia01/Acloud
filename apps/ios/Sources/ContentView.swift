@@ -209,6 +209,7 @@ struct AcloudMediaHeader:View {
 struct AcloudLocalThumbnail:UIViewRepresentable {
     let localID:String?
     @Binding var captureDate:Date?
+    var revision:Date?=nil
     var targetSize:CGFloat=320
     final class Coordinator {
         var identity:String?
@@ -229,7 +230,7 @@ struct AcloudLocalThumbnail:UIViewRepresentable {
     }
     func updateUIView(_ view:UIImageView,context:Context) {
         let status=PHPhotoLibrary.authorizationStatus(for:.readWrite)
-        let identity=(localID ?? "none")+"|"+String(status.rawValue)
+        let identity=(localID ?? "none")+"|"+String(status.rawValue)+"|"+String(revision?.timeIntervalSince1970 ?? 0)+"|"+String(Double(targetSize))
         let coordinator=context.coordinator
         guard identity != coordinator.identity else{return}
         coordinator.manager.cancelImageRequest(coordinator.request)

@@ -14,7 +14,7 @@ The verified-outcome callback scans durable queue/manifest state and schedules t
 
 Leaving the app, switching apps or locking the screen differs from force-quitting it in the app switcher. iOS controls execution and session scheduling; force-quit, expired authentication/authorization, unavailable originals and prolonged offline periods can require opening Acloud again. Preparation of another original and iCloud retrieval are not an unrestricted background-photo-library sync. This feature does not add APNs/server push or a background timer service. Notifications require the existing user permission and transfer-alert setting.
 
-Pending physical acceptance for this update:
+The owner confirmed background uploading works on 17 October 2026. This supersedes earlier upload-interruption reports. Specific background completion-alert receipt is not inferred from that confirmation. The following checks describe the remaining detailed acceptance matrix:
 
 1. With transfer alerts enabled and Wi-Fi connected, explicitly select a disposable local video. After its upload starts, leave Acloud and lock the iPad. Verify the item completes and a Backup verified notification arrives without reopening Acloud.
 2. Tap the notification and confirm Backup opens with the item Protected; restoring that item must still use server integrity proof.
@@ -31,8 +31,8 @@ A background multipart step that receives `URLError.networkConnectionLost` (`NET
 
 ## Starting queued work
 
-Explicit selection, retry, resume and restart request queue execution immediately, before history/manifest refreshes. Requests arriving while a worker is running trigger another pass after its current work and refresh finish. Periodic recovery scheduling lives at the app tab-container level, so changing tabs does not remove it. The timer is only a foreground fallback; it is not an iOS background-execution entitlement. Preparing originals and handing a file to the background session must still occur before system suspension. Physical locked-screen completion remains an acceptance check, not a conclusion from successful builds.
+Explicit selection, retry, resume and restart request queue execution immediately, before history/manifest refreshes. Requests arriving while a worker is running trigger another pass after its current work and refresh finish. Periodic recovery scheduling lives at the app tab-container level, so changing tabs does not remove it. The timer is only a foreground fallback; it is not an iOS background-execution entitlement. Preparing originals and handing a file to the background session must still occur before system suspension. Background uploading is owner-accepted; specific locked-screen completion-alert receipt remains a separate acceptance check.
 
 ## Interruption diagnostics
 
-Failed attempts now persist a bounded app-defined stage alongside the existing sanitized error code. Details & support shows “Stopped while…” to distinguish original preparation, session setup, authorization, byte transfer, part reconciliation and verification. No media identifier, filename, URL, credential or server body is added. Old records decode with no stage, and explicit retry/resume clears stale stage details. This is diagnostic coverage; physical background completion remains unconfirmed until an actual locked-device run succeeds.
+Failed attempts now persist a bounded app-defined stage alongside the existing sanitized error code. Details & support shows “Stopped while…” to distinguish original preparation, session setup, authorization, byte transfer, part reconciliation and verification. No media identifier, filename, URL, credential or server body is added. Old records decode with no stage, and explicit retry/resume clears stale stage details. This is diagnostic coverage; background uploading was subsequently confirmed working by the owner; notification-specific acceptance remains separate.

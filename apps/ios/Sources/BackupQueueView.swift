@@ -93,33 +93,44 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  private var accountID:String?
  private var worker:Task<Void,Never>?
  var backgroundCompletion:(@Sendable()->Void)?
+ private var connectionGate=ConnectionGeneration()
+ func resumeAfterSignIn(){connectionGate.resume()}
  func connect() async throws {
+  while connectionGate.isConnecting{try await Task.sleep(for:.milliseconds(20))}
+  let generation=try connectionGate.begin()
+  defer{connectionGate.finish(generation)}
   guard BetaReleaseSafety.acceptedConfiguration else{throw BackupFailure.missing}
   guard let baseString=Bundle.main.object(forInfoDictionaryKey:"APIBaseURL") as? String,let base=URL(string:baseString) else{throw BackupFailure.missing}
   let background=Bundle.main.object(forInfoDictionaryKey:"BackgroundUploadsEnabled") as? Bool ?? false
   let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session",allowsBackgroundAccess:background)
   let accountAPI=AuthAPI(baseURL:base,store:tokens)
   let account=try await accountAPI.me()
+  try connectionGate.validate(generation)
   #if !DEBUG
   guard try await accountAPI.realMediaAccepted() else{canSelectOriginals=false;throw BackupFailure.policy}
   let boundDevice=try await accountAPI.currentDeviceID()
+  try connectionGate.validate(generation)
   #endif
   #if DEBUG
   let photoTestEnabled=Bundle.main.object(forInfoDictionaryKey:"DevelopmentSinglePhotoBackup") as? Bool ?? false
   let boundDevice:UUID?
   if accountID==account.id,let deviceID {boundDevice=deviceID}
   else {boundDevice=photoTestEnabled ? try? await accountAPI.currentDeviceID() : nil}
+  try connectionGate.validate(generation)
   let photoAccessReady=photoTestEnabled && boundDevice != nil
   var complexTestReady=false
   if photoAccessReady,Bundle.main.object(forInfoDictionaryKey:"DevelopmentComplexMediaBackup") as? Bool == true {
    complexTestReady=(try await accountAPI.ownerDeviceTestRestoreAssets()) != nil
   }
+  try connectionGate.validate(generation)
   if engine != nil,accountID==account.id,canSelectOriginals==photoAccessReady,complexBackupTestAvailable==complexTestReady{return}
   #else
   if engine != nil,accountID==account.id,deviceID==boundDevice{return}
   #endif
   if let engine{try await engine.pauseAll()}
+  try connectionGate.validate(generation)
   await transport?.shutdown()
+  try connectionGate.validate(generation)
   guard let user=UUID(uuidString:account.id),let support=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask).first else{throw BackupFailure.missing}
   var root=support.appendingPathComponent("BackupQueue",isDirectory:true).appendingPathComponent(user.uuidString,isDirectory:true)
   #if !DEBUG
@@ -161,21 +172,38 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   queue=q;engine=e;transport=transfer;library=lib;accountID=account.id;monitor=BackupNetworkMonitor(coordinator:e,onChange:{[weak self] in Task{@MainActor in await self?.tick()}})
   if let completion=backgroundCompletion{transfer.reconnect(completion:completion);backgroundCompletion=nil}
   var policy=BackupPolicy();policy.allowICloudOriginals=allowICloudOriginals;try await e.setPolicy(policy)
+  try connectionGate.validate(generation)
   alertsSuspended=false
   await observeTransferAlerts()
+  try connectionGate.validate(generation)
   try await e.reconcileStartup()
+  try connectionGate.validate(generation)
   #if DEBUG
   message=canSelectOriginals ? "Development test: explicitly choose up to 10 disposable ordinary photos or short videos. Keep the original. Real-device validation remains pending." : (photoTestEnabled ? "Photo test unavailable: could not confirm this signed-in device. Open Account and sign in again, then return here." : "Photo test flag missing in this installed build. Run the updated Debug build from Xcode.")
   if (try? await accountAPI.ownerDeviceTestRestoreAssets()) != nil {
+   try connectionGate.validate(generation)
    message="Private staging test for this account and device. Keep each item under 32 MB and keep your originals."
   }
   #else
+  try connectionGate.validate(generation)
   message="Choose photos or videos to back up. Keep your originals during beta testing. Support for Live Photos, RAW and edits is still being validated."
   #endif
  }
  func refresh() async {
-  do{try await connect();if let queue{summary=try await queue.summary();let requestedAnchor=transferAnchor;let page=try await queue.recent(before:requestedAnchor,limit:100);guard transferAnchor?.id==requestedAnchor?.id else{return};items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil};await reconcileManifests();await observeTransferAlerts()}catch{message="Backup connector unavailable. Device acceptance is pending."}
+  do {
+   try await connect()
+   let generation=connectionGate.current
+   if let queue {
+    let counts=try await queue.summary(),requestedAnchor=transferAnchor
+    let page=try await queue.recent(before:requestedAnchor,limit:100)
+    try connectionGate.validate(generation)
+    guard transferAnchor?.id==requestedAnchor?.id else{return}
+    summary=counts;items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil
+   }
+   await reconcileManifests();try connectionGate.validate(generation);await observeTransferAlerts()
+  }catch is CancellationError {}catch{message="Backup connector unavailable. Device acceptance is pending."}
  }
+
  func verifiedInBackground() async {await reconcileManifests();await observeTransferAlerts()}
  // Scan the full durable queue, independently of the visible history page.
  private func observeTransferAlerts() async {
@@ -237,7 +265,6 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    #if !DEBUG
    guard let store=self.manifestStore,let api=self.manifestAPI else{throw BackupFailure.missing}
    let binding=ManifestBinding(accountID:account,deviceID:device,libraryID:library)
-   let planner=MultiResourceBackupPlanner(store:store,queue:queue)
    #endif
    guard let summary=await BackupSelectionPolicy.process(ids,unavailableCount:unavailableCount,operation:{id in
     guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library else{return .failed}
@@ -283,9 +310,20 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
      let queuedID=try await queue.enqueue(item)
      return queuedID==item.id ? .added:.existing
      #else
-     if try await queue.find(library:library,localID:id) != nil{return .existing}
      let snapshot=try await PhotoKitMediaSource().snapshot(id)
-     let manifest=try await planner.captureExplicit(source:snapshot,binding:binding)
+      let planner=MultiResourceBackupPlanner(store:store,queue:queue)
+      let existing=try await planner.existing(source:snapshot,binding:binding)
+      let manifest:MediaManifest
+      var replaceCancelled=false
+      if let existing {
+       for resource in existing.resources {
+        if let queued=try await queue.read(resource.id),queued.state == .cancelled {
+         guard let engine=self.engine else{throw BackupFailure.missing}
+         if try await engine.settleCancellation(queued.id).state == .cancelled{replaceCancelled=true}
+        }
+       }
+      }
+      if let existing,!replaceCancelled{manifest=existing}else{manifest=try await planner.captureExplicit(source:snapshot,binding:binding)}
      _=try await api.createManifest(manifest)
      guard self.accountID?.lowercased()==account.uuidString.lowercased(),self.deviceID==device,self.library==library else{return .failed}
      var hasNewResource=false
@@ -310,10 +348,14 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  }
 
  func reconcileManifests()async{
+  let generation=connectionGate.current
+  guard (try? connectionGate.validate(generation)) != nil else{return}
   guard let store=manifestStore,let api=manifestAPI,let binding=preservationBinding else{return}
   guard let page=try? await store.page(binding:binding,after:manifestReconcileCursor,limit:50) else{return}
+  guard (try? connectionGate.validate(generation)) != nil else{return}
   manifestReconcileCursor=page.count==50 ? page.last?.id:nil
   for manifest in page{
+   guard (try? connectionGate.validate(generation)) != nil else{return}
    // Reconcile server verification first: a finished saved version no longer follows device edits.
    guard let proof=try? await api.manifestProof(manifest.id),let current=try? await store.apply(proof,to:manifest.id) else{continue}
    guard current.requiresSourceRevalidation else{continue}
@@ -321,7 +363,9 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    if let fresh=try? await PhotoKitMediaSource().snapshot(current.source.localID),!current.matches(fresh){try? await api.invalidateManifest(current.id,fingerprint:fresh.fingerprint)}
    if let proof=try? await api.manifestProof(current.id){_=try? await store.apply(proof,to:current.id)}
   }
-  manifests=(try? await store.page(binding:binding,limit:50)) ?? []
+  let refreshed=(try? await store.page(binding:binding,limit:50)) ?? []
+  guard (try? connectionGate.validate(generation)) != nil else{return}
+  manifests=refreshed
  }
  func action(selection:Bool=false,_ operation:() async throws -> Void) async {
   busy=true;defer{busy=false}
@@ -370,7 +414,22 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  func tick() async {
   do{try await connect();startWorker(requestAnotherPass:false);await refresh()}catch{message="Waiting for account or API access."}
  }
- func stopForSignOut() async throws{AcloudPreviewRegistry.shared.clear();alertsSuspended=true;TransferNotifications.shared.signOut();worker?.cancel();try await engine?.pauseAll();await transport?.shutdown();await worker?.value;worker=nil;monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil;manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;complexBackupTestAvailable=false;items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false}
+ func stopForSignOut() async throws {
+  connectionGate.suspend()
+  AcloudPreviewRegistry.shared.clear();alertsSuspended=true;TransferNotifications.shared.signOut()
+  let previousWorker=worker,previousEngine=engine,previousTransport=transport
+  previousWorker?.cancel()
+  monitor=nil;engine=nil;transport=nil;queue=nil;manifestStore=nil;manifestAPI=nil;preservationBinding=nil
+  manifests=[];accountID=nil;deviceID=nil;canSelectOriginals=false;complexBackupTestAvailable=false
+  items=[];summary=[:];transferAnchor=nil;hasOlderTransfers=false;showingOlderTransfers=false
+  var pauseError:Error?
+  do{try await previousEngine?.pauseAll()}catch{pauseError=error}
+  await previousTransport?.shutdown()
+  await previousWorker?.value
+  worker=nil;workerRequested=false
+  if let pauseError{throw pauseError}
+ }
+
  func handleBackground(completion:@escaping @Sendable()->Void) async {
   let allowance=BackupBackgroundTime()
   let receipt=BackgroundEventCompletion{Task{@MainActor in allowance.end();completion()}}

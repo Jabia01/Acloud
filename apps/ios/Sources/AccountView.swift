@@ -55,7 +55,7 @@ struct AccountView: View {
         AcloudPreviewRegistry.shared.clear()
         await RestoreModel.shared.invalidate()
         await StorageScreen.model.invalidate()
-        do { try await BackupQueueModel.shared.stopForSignOut(); account = try await api.login(email: email, password: password, deviceIdentifier: deviceIdentifier); password = ""; message = "" }
+        do { try await BackupQueueModel.shared.stopForSignOut(); account = try await api.login(email: email, password: password, deviceIdentifier: deviceIdentifier); BackupQueueModel.shared.resumeAfterSignIn(); password = ""; message = "" }
         catch { message = "Unable to sign in. Check your credentials or connection." }
     }
     @MainActor private func register() async {
