@@ -59,7 +59,7 @@ describe('real PostgreSQL + private S3 generated-file uploads',{concurrency:fals
     assert.ok(['127.0.0.1','localhost'].includes(new URL(process.env.S3_ENDPOINT!).hostname));
     admin=new Pool({connectionString:originalURL}); await admin.query(`CREATE SCHEMA ${schema}`);
     const url=new URL(originalURL); url.searchParams.set('options',`-c search_path=${schema}`); process.env.DATABASE_URL=url.href;
-    const {migrate}=await import('../../../scripts/migrate.mjs'); assert.equal(await migrate(),15); assert.equal(await migrate(),0);
+    const {migrate}=await import('../../../scripts/migrate.mjs'); assert.equal(await migrate(),16); assert.equal(await migrate(),0);
     pool=new Pool({connectionString:url.href});
     const module=await Test.createTestingModule({imports:[AppModule]}).overrideProvider(AccountMailer).useValue(new MemoryAccountMailer()).overrideGuard(AuthRateLimit).useValue({canActivate:()=>true}).compile();
     app=module.createNestApplication(); app.useGlobalFilters(new SafeErrors()); await app.init();
