@@ -47,3 +47,9 @@ Policy/encryption/retention negative tests and downloaded-snapshot isolated rest
 ## Alert delivery test
 
 Dispatch the existing protected workflow with mode `alert-test` to send a clearly labelled test notification through the same sender used for backup failures. This mode reads only the alert key/from/to settings; it does not connect to the source database or backup bucket, trigger an outage, or change a success marker. The log reports the provider message ID and acceptance. Confirm delivery status and actual inbox receipt separately; provider acceptance alone is not inbox confirmation.
+
+## Temporary B2 failures
+
+Safe authorization/list/download calls and encrypted uploads make at most five attempts on HTTP408/429/500/502/503/504 or selected transport timeouts/resets. Backoff starts at one second, doubles and adds bounded jitter. Retry-After is respected up to sixty seconds; a longer requested wait fails rather than retrying too soon. Upload retries obtain a fresh B2 upload URL/token and send the same scoped encrypted bytes/checksum. A lost response can leave an extra encrypted object version; the returned exact version is still downloaded and verified before success, and ordinary retention handles old versions. Retention deletion calls are not automatically replayed. Credential, TLS, scope, response-binding, decryption and integrity failures remain terminal.
+
+Provider upload behavior: https://www.backblaze.com/apidocs/b2-upload-file
