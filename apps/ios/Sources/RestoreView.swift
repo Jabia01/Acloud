@@ -200,7 +200,7 @@ struct RestoreView:View {
   NavigationStack {
    List {
     Section {
-     AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Back to your Photos.",message:"Select a verified backup to save a new copy to your device. Your cloud backup stays protected.").acloudFeatureRow()
+     AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Your saved memories.",message:"Browse verified backups. Select items to restore a new copy to Photos; your cloud backups stay unchanged.").acloudFeatureRow()
     }
     Section {
      Text("Save a new copy to Photos. Your cloud backup stays unchanged; restored items may sync to iCloud.").font(.subheadline).foregroundStyle(.secondary)
@@ -224,7 +224,7 @@ struct RestoreView:View {
       }
      }
      Text(selecting ? "Tap photos to select them. Up to 10 per restore batch.":"Tap a thumbnail to view. Choose Select to restore several items together.").font(.footnote).foregroundStyle(.secondary)
-     if !model.canRestore{Text("Restore access is currently unavailable for this session. Existing cloud backups stay protected.").foregroundStyle(.secondary)}
+     if !model.canRestore{Text("Restore access is unavailable for this session. Sign in again or ask the owner to check device access. Existing cloud backups stay protected.").foregroundStyle(.secondary)}
      else if gallery.isEmpty{ContentUnavailableView("No matching saved items",systemImage:"photo.on.rectangle",description:Text("Try another media filter or refresh the protected library."))}
      AcloudGalleryGrid(items:gallery,order:galleryOrder,size:gallerySize,selecting:selecting,selected:Set(model.selected.map(\.uuidString)),onSelect:{entry in if let id=UUID(uuidString:entry.id){model.select(id,on:!model.selected.contains(id))}},onOpen:{entry in viewer=AcloudGalleryPresentation(items:gallery,startID:entry.id)})
       .disabled(model.busy)
@@ -274,7 +274,7 @@ struct RestoreView:View {
      if model.items.count==100{Button("Next queue page"){Task{await model.refresh(next:true)}}}
      if model.showingLaterQueuePage{Button("First queue page"){Task{await model.firstQueuePage()}}}
     }}
-   }.acloudCanvas().navigationTitle("Restore")
+   }.acloudCanvas().navigationTitle("Saved in Acloud")
     .safeAreaInset(edge:.bottom) {
      if selecting || !model.selected.isEmpty {
       HStack {

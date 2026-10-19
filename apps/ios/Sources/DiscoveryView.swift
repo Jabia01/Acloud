@@ -214,7 +214,7 @@ struct DiscoveryView: View {
                         }.font(.subheadline)
                     }
                 }.padding()
-            }.background(AcloudStyle.canvas).navigationTitle("Library")
+            }.background(AcloudStyle.canvas).navigationTitle("On this device")
              .toolbar{ToolbarItem(placement:.topBarTrailing){Button{Task{await model.refresh()}}label:{Image(systemName:"arrow.clockwise")}.accessibilityLabel("Refresh library")}}
              .safeAreaInset(edge:.bottom) {
                 if selecting || !selected.isEmpty {
@@ -438,7 +438,7 @@ private struct AcloudDeviceViewer:View {
     var body:some View {
         Group {
             if let player=model.player{VideoPlayer(player:player)}
-            else if let image=model.image{Image(uiImage:image).resizable().scaledToFit()}
+            else if let image=model.image{AcloudZoomableImage(image:image)}
             else{ContentUnavailableView("Device preview",systemImage:type=="video" ? "video":"photo",description:Text(model.message))}
         }.frame(maxWidth:.infinity,maxHeight:.infinity)
          .onAppear{model.load(localID,type:type)}.onDisappear{model.stop()}
@@ -458,11 +458,11 @@ private struct AcloudSavedViewerContent:View {
     let type:String
     var body:some View {
         VStack(spacing:16) {
-            if let data=loader.data,let image=UIImage(data:data){Image(uiImage:image).resizable().scaledToFit().frame(maxHeight:.infinity)}
+            if let data=loader.data,let image=UIImage(data:data){AcloudZoomableImage(image:image).frame(maxHeight:.infinity)}
             else{ContentUnavailableView("Saved preview",systemImage:type=="video" ? "video":"photo")}
-            if loader.loading{ProgressView("Loading saved preview…")}
+            if loader.loading{AcloudPreviewProgress(loader:loader)}
             else if loader.data==nil{Button("Load saved thumbnail over Wi-Fi"){Task{await loader.load(account:account,asset:asset,checksum:checksum,download:true)}}.buttonStyle(.bordered)}
-            Text(loader.message ?? "Reduced-resolution saved thumbnail. Restore a copy to Photos for the full-quality photo or video playback.").font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Text(loader.message ?? "This is the saved thumbnail, not your current Photos version. Restore a copy for full-quality viewing or video playback.").font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }.task{await loader.load(account:account,asset:asset,checksum:checksum)}
     }
 }

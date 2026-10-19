@@ -12,8 +12,8 @@ struct ContentView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             BackupQueueView().tag("backup").tabItem { Label("Backup", systemImage: "icloud.and.arrow.up") }
-            DiscoveryView().tag("library").tabItem { Label("Library", systemImage: "photo.on.rectangle") }
-            RestoreView().tag("restore").tabItem { Label("Restore", systemImage: "arrow.down.circle") }
+            DiscoveryView().tag("library").tabItem { Label("On device", systemImage: "photo.on.rectangle") }
+            RestoreView().tag("restore").tabItem { Label("Saved", systemImage: "arrow.down.circle") }
             StorageView().tag("storage").tabItem { Label("Storage", systemImage: "externaldrive") }
             AccountView().tag("account").tabItem { Label("Account", systemImage: "person") }
             #if DEBUG
@@ -53,7 +53,7 @@ struct ContentView: View {
 
 // Shared presentation only. These views never grant protection or change transfer state.
 enum AcloudStyle {
-    static let accent = Color(red:0.12, green:0.40, blue:0.46)
+    static let accent = Color(red:0, green:0.40, blue:0.80)
     static let canvas = Color(uiColor:.systemGroupedBackground)
 }
 
@@ -73,7 +73,7 @@ struct AcloudHero:View {
         }
         .frame(maxWidth:.infinity,alignment:.leading).padding(24)
         .foregroundStyle(.white)
-        .background(LinearGradient(colors:[AcloudStyle.accent,Color(red:0.08,green:0.22,blue:0.31)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:24))
+        .background(LinearGradient(colors:[AcloudStyle.accent,Color(red:0.07,green:0.24,blue:0.45)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:24))
     }
 }
 
@@ -357,10 +357,14 @@ enum AcloudPreviewFailureMessage {
     @Published var data:Data?
     @Published var loading=false
     @Published var message:String?
+    @Published var previewBytes=0
+    @Published var previewSize=0
+    @Published var previewStage=""
     private static var downloadBusy=false
     private var activeDownload:FileRestoreDownloader?
     private var generation=UUID()
-    func invalidate(){generation=UUID();data=nil;loading=false;message=nil;if let activeDownload{Task{await activeDownload.cancel()}};activeDownload=nil}
+    func invalidate(){generation=UUID();data=nil;loading=false;message=nil;previewBytes=0;previewSize=0;previewStage="";if let activeDownload{Task{await activeDownload.cancel()}};activeDownload=nil}
+    func cancelPreview(){invalidate();message="Preview loading cancelled. Your saved backup is unchanged."}
     private func connection(account:UUID)async throws->HTTPRestoreAPI {
         guard BetaReleaseSafety.acceptedConfiguration,let value=Bundle.main.object(forInfoDictionaryKey:"APIBaseURL") as? String,let base=URL(string:value) else{throw RestoreFailure.authorization}
         let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session")
@@ -370,7 +374,7 @@ enum AcloudPreviewFailureMessage {
     func load(account:UUID,asset:UUID,checksum:String?,download:Bool=false)async {
         guard !loading else{return};let epoch=generation;loading=true;defer{if epoch==generation{loading=false}}
         var step="checking access"
-        if download {message=nil}
+        if download {message=nil;previewBytes=0;previewSize=0;previewStage="Checking access"}
         do {
             if let checksum,!download {
                 let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:checksum)
@@ -380,6 +384,7 @@ enum AcloudPreviewFailureMessage {
             let api=try await connection(account:account)
             step="checking the saved file"
             let proof=try await api.previewEvidence(asset)
+            previewSize=proof.expectedSize
             guard proof.id==asset,proof.previewSupported,checksum==nil || checksum==proof.expectedSha256 else{throw RestoreFailure.versionChanged}
             if let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:proof.expectedSha256) {try Task.checkCancellation();guard epoch==generation else{return};data=cached;return}
             guard download else{return}
@@ -396,14 +401,14 @@ enum AcloudPreviewFailureMessage {
             defer{try? FileManager.default.removeItem(at:directory)}
             guard epoch==generation else{return}
             let downloader=try FileRestoreDownloader(origin:origin,allowLocalHTTP:_isDebugAssertConfiguration());activeDownload=downloader
-            step="downloading the saved file"
-            try await downloader.download(authorization.authorization,to:files.url(id),expectedSize:proof.expectedSize,progress:{_ in})
-            step="verifying the downloaded file"
+            step="downloading the saved file";previewStage="Downloading saved file"
+            try await downloader.download(authorization.authorization,to:files.url(id),expectedSize:proof.expectedSize,progress:{[weak self] count in Task{@MainActor in guard let self,self.generation==epoch else{return};self.previewBytes=count}})
+            step="verifying the downloaded file";previewStage="Verifying saved file"
             try files.verify(RestoreItem(accountID:account,libraryID:UUID(),evidence:proof,id:id))
             step="confirming the saved version"
             guard try await api.previewRecheck(proof)==proof else{throw RestoreFailure.versionChanged}
             _=try await connection(account:account);try Task.checkCancellation()
-            step="creating the thumbnail"
+            step="creating the thumbnail";previewStage="Creating preview"
             let preview=try await AcloudPreviewStore.shared.capture(file:files.url(id),account:account,asset:asset,checksum:proof.expectedSha256,size:proof.expectedSize,mediaType:proof.mediaType)
             try Task.checkCancellation();guard epoch==generation else{return};data=preview;message=nil
         } catch is CancellationError {return}
@@ -455,10 +460,41 @@ private struct AcloudPreviewControl:View {
     var body:some View {
         VStack(alignment:.leading,spacing:4) {
             if loader.data==nil {
-                if loader.loading {ProgressView("Loading saved preview…").font(.caption)}
+                if loader.loading {AcloudPreviewProgress(loader:loader)}
                 else {Button("Load saved thumbnail over Wi-Fi"){Task{await loader.load(account:account,asset:asset,checksum:checksum,download:true)}}.font(.caption).buttonStyle(.borderless)}
                 Text(loader.message ?? "Older backups may need the saved original downloaded to create a preview. Nothing is added to Photos.").font(.caption2).foregroundStyle(.secondary)
             }
         }.task {await loader.load(account:account,asset:asset,checksum:checksum)}
     }
+}
+
+// Display-only controls. These never authorize a download or modify Photos.
+struct AcloudPreviewProgress:View {
+ @ObservedObject var loader:AcloudPreviewLoader
+ var body:some View {VStack(alignment:.leading,spacing:8){
+  if loader.previewSize>0 {ProgressView(loader.previewStage.isEmpty ? "Loading saved preview":loader.previewStage,value:Double(loader.previewBytes),total:Double(loader.previewSize));Text("\(Int64(loader.previewBytes).formatted(.byteCount(style:.file))) of \(Int64(loader.previewSize).formatted(.byteCount(style:.file)))").font(.caption).foregroundStyle(.secondary)}
+  else{ProgressView("Checking saved preview…")}
+  Button("Cancel preview"){loader.cancelPreview()}.font(.caption)
+ }}
+}
+struct AcloudZoomableImage:View {
+ let image:UIImage
+ @State private var scale:CGFloat=1
+ @State private var savedScale:CGFloat=1
+ @State private var offset:CGSize = .zero
+ @State private var savedOffset:CGSize = .zero
+ var body:some View {Image(uiImage:image).resizable().scaledToFit().scaleEffect(scale).offset(offset)
+  .simultaneousGesture(DragGesture().onChanged{value in if scale>1 {offset=CGSize(width:savedOffset.width+value.translation.width,height:savedOffset.height+value.translation.height)}}.onEnded{_ in savedOffset=offset})
+  .gesture(MagnificationGesture().onChanged{value in scale=min(5,max(1,savedScale*value))}.onEnded{_ in savedScale=scale;if scale==1{offset = .zero;savedOffset = .zero}})
+  .onTapGesture(count:2){scale=scale>1 ? 1:2;savedScale=scale;if scale==1 {offset = .zero;savedOffset = .zero}}
+  .accessibilityLabel("Photo preview")
+  .accessibilityHint("Pinch or double tap to zoom. Double tap again to reset.")
+  .accessibilityAction(named:"Reset zoom"){scale=1;savedScale=1;offset = .zero;savedOffset = .zero}
+  .clipped()
+ }
+}
+func acloudCapacity<T:BinaryInteger>(_ bytes:T)->String {
+ let value=max(0,Double(bytes)),units=["B","KiB","MiB","GiB","TiB"]
+ let unit=value>0 ? min(4,Int(log(value)/log(1024))):0
+ return (value/pow(1024,Double(unit))).formatted(.number.precision(.fractionLength(unit==0 ? 0:1)))+" "+units[unit]
 }

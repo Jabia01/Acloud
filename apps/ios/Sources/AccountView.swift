@@ -6,6 +6,7 @@ struct AccountView: View {
     @State private var account: AccountStatus?
     @State private var email = ""
     @State private var password = ""
+    @State private var showPassword = false
     @State private var message = ""
     @State private var busy = false
     private let deviceIdentifier: String
@@ -33,9 +34,11 @@ struct AccountView: View {
             } else {
                 Section("Account") {
                     TextField("Email", text: $email).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.emailAddress).textContentType(.username)
-                    SecureField("Password", text: $password).textContentType(.password)
+                    if showPassword {TextField("Password",text:$password).textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.password)}else{SecureField("Password", text: $password).textContentType(.password)}
+                    Toggle("Show password",isOn:$showPassword)
                     Button("Sign In") { Task { await signIn() } }.disabled(busy)
-                    Button("Create Account") { Task { await register() } }.disabled(busy)
+                    Link("Forgot password?",destination:URL(string:"https://staging.useacloud.com/forgot-password")!)
+                    Button("Create invited account") { Task { await register() } }.disabled(busy)
                     Text("New passwords require at least 12 characters. Verification and recovery links open on the Acloud website.").font(.footnote)
                 }
             }

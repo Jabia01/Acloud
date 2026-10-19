@@ -446,6 +446,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  }
 }
 struct BackupQueueView:View {
+ @AppStorage("selectedTransferTab") private var selectedAppTab="backup"
  @ObservedObject private var model=BackupQueueModel.shared
  private enum PickerSelection:String,Identifiable {case photo,video,originals;var id:String{rawValue}}
  @State private var pickerSelection:PickerSelection?
@@ -490,12 +491,12 @@ struct BackupQueueView:View {
      AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Make room for memories.",message:"Choose what to back up. We check each stored file before marking it protected. Keep your originals during beta.").acloudFeatureRow()
     }
     Section {
-     Picker("Browse backups",selection:$browserMode){Text("Gallery").tag("gallery");Text("Transfers").tag("transfers")}.pickerStyle(.segmented)
+     Picker("Browse backups",selection:$browserMode){Text("Recent saves").tag("gallery");Text("Transfers").tag("transfers")}.pickerStyle(.segmented)
     }
     if browserMode == "transfers" {
     Section {
      LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
-      AcloudMetric(title:"Verified files",value:protectedCount.formatted(),icon:"checkmark.shield")
+      AcloudMetric(title:"Verified resource files",value:protectedCount.formatted(),icon:"checkmark.shield")
       AcloudMetric(title:"Queued or in progress",value:waitingCount.formatted(),icon:"arrow.triangle.2.circlepath")
       AcloudMetric(title:"Paused or needs attention",value:attentionCount.formatted(),icon:"exclamationmark.circle")
      }.acloudFeatureRow()
@@ -516,7 +517,7 @@ struct BackupQueueView:View {
      }
      #endif
      Toggle("Download iCloud originals on Wi-Fi",isOn:$model.allowICloudOriginals).onChange(of:model.allowICloudOriginals){_,_ in Task{await model.updateOriginalPolicy()}}
-     Text("iCloud downloads happen only when you allow them. Selecting library access does not start a backup.").font(.footnote).foregroundStyle(.secondary)
+     Text("iCloud downloads happen only when allowed. To choose items, sign in and confirm backup access for this device.").font(.footnote).foregroundStyle(.secondary)
      if model.originalProgress>0 {ProgressView("Preparing original",value:model.originalProgress)}
      Text(model.message).font(.footnote).foregroundStyle(.secondary)
     }
@@ -533,7 +534,8 @@ struct BackupQueueView:View {
      }
     }
     if browserMode == "gallery" {
-     Section("Saved photos & videos") {
+     Section("Recently saved from transfers") {
+      Button("Browse all saved backups"){selectedAppTab="restore"}.buttonStyle(.borderedProminent)
       AcloudGalleryControls(filter:$galleryFilter,order:$galleryOrder,size:$gallerySize)
       Text("Tap a thumbnail to view its saved version. This gallery shows completed items from the loaded transfers; open Restore for your protected library.").font(.caption).foregroundStyle(.secondary)
       if savedGallery.isEmpty{ContentUnavailableView("No matching saved items on this page",systemImage:"photo.on.rectangle",description:Text("Try another filter or check Transfers for work in progress."))}

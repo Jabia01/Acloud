@@ -10,7 +10,7 @@ const environmentFile = resolve(process.cwd(), '../../.env');
 
 const config: NextConfig = {
   poweredByHeader: false,
-  allowedDevOrigins: ['192.168.1.217'],
+  allowedDevOrigins: ['192.168.1.217','127.0.0.1','localhost'],
   logging: { incomingRequests: false },
   async headers() { return [{ source: '/:path*', headers: [
     ...(process.env.NODE_ENV==='production'?[{key:'Strict-Transport-Security',value:'max-age=31536000; includeSubDomains'}]:[]),

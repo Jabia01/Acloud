@@ -43,14 +43,15 @@ struct StorageView:View {
     Section("Cloud storage") {
      if let cloud=model.cloud {
       VStack(alignment:.leading,spacing:14) {
-       Text("\(cloud.protectedBytes.formatted(.byteCount(style:.file))) protected").font(.system(.title2,design:.rounded).weight(.bold))
+       Text("\(acloudCapacity(cloud.protectedBytes)) protected").font(.system(.title2,design:.rounded).weight(.bold))
        ProgressView(value:Double(min(cloud.protectedBytes,cloud.quotaBytes)),total:Double(max(1,cloud.quotaBytes))).accessibilityLabel("Cloud storage used")
-       Text("\(cloud.quotaBytes.formatted(.byteCount(style:.file))) total capacity").foregroundStyle(.secondary)
+       Text("\(acloudCapacity(cloud.quotaBytes)) total capacity").foregroundStyle(.secondary)
+       Text("Capacity uses GiB: a 5 GB plan is about 4.7 GiB. Live Photos and edits may contain several resource files.").font(.caption).foregroundStyle(.secondary)
        if cloud.overQuota {Label("Storage limit reached. Existing verified backups are retained.",systemImage:"exclamationmark.circle").foregroundStyle(.orange)}
       }.padding(.vertical,10)
       LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
-       AcloudMetric(title:"Available",value:cloud.remainingBytes.formatted(.byteCount(style:.file)),icon:"externaldrive.badge.plus")
-       AcloudMetric(title:"Reserved for transfers",value:cloud.reservedBytes.formatted(.byteCount(style:.file)),icon:"arrow.up.circle")
+       AcloudMetric(title:"Available",value:acloudCapacity(cloud.remainingBytes),icon:"externaldrive.badge.plus")
+       AcloudMetric(title:"Reserved for transfers",value:acloudCapacity(cloud.reservedBytes),icon:"arrow.up.circle")
       }.acloudFeatureRow()
      } else {
       Label("Storage usage is unavailable",systemImage:"externaldrive.badge.questionmark").font(.headline)
