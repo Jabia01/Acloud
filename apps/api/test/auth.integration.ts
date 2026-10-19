@@ -35,7 +35,7 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
     url.searchParams.set('options', `-c search_path=${schema}`);
     process.env.DATABASE_URL = url.href;
     const { migrate } = await import('../../../scripts/migrate.mjs');
-    assert.equal(await migrate(), 16);
+    assert.equal(await migrate(), 17);
     assert.equal(await migrate(), 0);
     pool = new Pool({ connectionString: url.href });
     const module = await Test.createTestingModule({ imports: [AppModule] }).overrideProvider(AccountMailer).useValue(mail).overrideGuard(AuthRateLimit).useValue(flowLimiter).compile();
@@ -92,6 +92,37 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
     await pool.query("UPDATE users SET status='DISABLED' WHERE id=$1", [userId]);
     const disabled = await login().expect(401);
     assert.deepEqual(wrong.body, { message: 'Invalid credentials' }); assert.deepEqual(absent.body, wrong.body); assert.deepEqual(disabled.body, wrong.body);
+  });
+  test('session limit has a clear message only after valid credentials, without revoking sessions', async () => {
+    const limit = 10;
+    const saved = process.env.MAX_ACTIVE_SESSIONS; process.env.MAX_ACTIVE_SESSIONS = String(limit);
+    try {
+      for (let i = 0; i < limit; i++) await pool.query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '1 day')", [randomUUID(),userId,digest(randomUUID())]);
+      const capped = await login().expect(409);
+      assert.deepEqual(capped.body,{message:'Session limit reached. Sign out of another browser or device, then try again.'});
+      assert.equal(capped.headers['cache-control'],'no-store'); safe(capped.body);
+      await post('/auth/login',{email:address,password:randomUUID()}).expect(401,{message:'Invalid credentials'});
+      assert.equal((await pool.query('SELECT count(*)::int n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[userId])).rows[0].n,limit);
+      await pool.query("UPDATE sessions SET revoked_at=now() WHERE id=(SELECT id FROM sessions WHERE user_id=$1 LIMIT 1)",[userId]);
+      await login().expect(200);
+    } finally { if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved; }
+  });
+  test('expired and revoked sessions do not block sign-in', async () => {
+    const saved=process.env.MAX_ACTIVE_SESSIONS;process.env.MAX_ACTIVE_SESSIONS='1';
+    try {
+      await pool.query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,now()-interval '1 day')",[randomUUID(),userId,digest(randomUUID())]);
+      await pool.query("INSERT INTO sessions(id,user_id,token_hash,expires_at,revoked_at) VALUES($1,$2,$3,now()+interval '1 day',now())",[randomUUID(),userId,digest(randomUUID())]);
+      await login().expect(200);
+      await login().expect(409);
+    } finally { if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved; }
+  });
+  test('concurrent sign-ins cannot exceed the session limit', async () => {
+    const saved=process.env.MAX_ACTIVE_SESSIONS;process.env.MAX_ACTIVE_SESSIONS='1';
+    try {
+      const results=await Promise.all([login(),login()]);
+      assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+      assert.equal((await pool.query('SELECT count(*)::int n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[userId])).rows[0].n,1);
+    } finally { if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved; }
   });
   test('session issuance stores only its hash; /me is authenticated and returns safe fields', async () => {
     await request(app.getHttpServer()).get('/me').expect(401);

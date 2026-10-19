@@ -1,3 +1,4 @@
+import {paymentConfiguration} from './configuration';
 import {Injectable,ServiceUnavailableException} from '@nestjs/common';
 import {createHmac,timingSafeEqual} from 'node:crypto';
 export type Price={amount_minor:string;currency:string;provider_plan_code:string;billing_interval:string;environment:string};
@@ -16,7 +17,7 @@ export abstract class BillingProvider {
 export function safeCheckoutUrl(value:string){try{const u=new URL(value);return u.protocol==='https:'&&u.hostname==='checkout.paystack.com'&&!u.username&&!u.password&&!u.port?u.href:null;}catch{return null;}}
 @Injectable()
 export class PaystackBillingProvider extends BillingProvider {
- private key(){const k=process.env.PAYSTACK_SECRET_KEY;if(process.env.BILLING_ENABLED!=='true'||!k||!(process.env.NODE_ENV==='production'&&process.env.APP_ENV!=='staging'?/^sk_live_/:/^sk_test_/).test(k))throw new ServiceUnavailableException('Billing unavailable');return k;}
+ private key(){if(!paymentConfiguration().checkoutEnabled)throw new ServiceUnavailableException('Billing unavailable');return process.env.PAYSTACK_SECRET_KEY!;}
  private async request(path:string,body?:unknown){try{const r=await fetch(`https://api.paystack.co${path}`,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${this.key()}`,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:AbortSignal.timeout(8000)});const value=await r.json() as any;if(!r.ok||value.status!==true )throw new Error();return value.data??{};}catch{throw new ServiceUnavailableException('Billing provider unavailable');}}
  async createCustomer(userId:string,email:string){
   // Existing email is only a lookup hint. Ownership metadata must match before reuse.
@@ -24,7 +25,7 @@ export class PaystackBillingProvider extends BillingProvider {
   const c=existing??await this.request('/customer',{email,metadata:{account_id:userId}});
   if(c.metadata?.account_id!==userId||typeof c.customer_code!=='string')throw new ServiceUnavailableException('Billing identity unavailable');return c.customer_code;
  }
- async validatePrice(p:Price){const d=await this.request(`/plan/${encodeURIComponent(p.provider_plan_code)}`);if(Number(d.amount)!==Number(p.amount_minor)||d.currency!==p.currency||d.interval!==(p.billing_interval==='MONTHLY'?'monthly':'annually')||d.domain?.toUpperCase()!==p.environment)throw new ServiceUnavailableException('Pricing unavailable');}
+ async validatePrice(p:Price){const d=await this.request(`/plan/${encodeURIComponent(p.provider_plan_code)}`);if(d.plan_code!==p.provider_plan_code||d.is_deleted===true||d.is_archived===true||Number(d.amount)!==Number(p.amount_minor)||d.currency!==p.currency||d.interval!==(p.billing_interval==='MONTHLY'?'monthly':'annually')||d.domain?.toUpperCase()!==p.environment)throw new ServiceUnavailableException('Pricing unavailable');}
  async initializeCheckout(email:string,reference:string,p:Price){const origin=process.env.WEB_ORIGIN;if(!origin)throw new ServiceUnavailableException('Billing unavailable');const u=new URL(origin);if(u.username||u.password||(process.env.NODE_ENV==='production'&&u.protocol!=='https:'))throw new ServiceUnavailableException('Billing unavailable');
   // First period is a one-off exact-price payment. Recurrence starts only after verification.
   const d=await this.request('/transaction/initialize',{email,amount:String(p.amount_minor),currency:p.currency,reference,callback_url:new URL('/billing/success',u).href,channels:['card']});if(d.reference!==reference||!safeCheckoutUrl(d.authorization_url))throw new ServiceUnavailableException('Checkout unavailable');return d.authorization_url;

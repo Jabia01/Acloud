@@ -35,7 +35,7 @@ describe('private owner device staging mode',{concurrency:false},()=>{
    delete process.env.DATABASE_CA_FILE;
    root=new pg.Pool({connectionString:original.href});await root.query('CREATE SCHEMA '+schema);
    original.searchParams.set('options','-c search_path='+schema);process.env.DATABASE_URL=original.href;
-   assert.equal(await migrate(),16);pool=new pg.Pool({connectionString:original.href});db=new DatabaseService();policy=new BetaPolicy(db);uploads=new UploadService(db,storage,policy);restore=new RestoreService(db,storage,policy);
+   assert.equal(await migrate(),17);pool=new pg.Pool({connectionString:original.href});db=new DatabaseService();policy=new BetaPolicy(db);uploads=new UploadService(db,storage,policy);restore=new RestoreService(db,storage,policy);
  });
  beforeEach(async()=>{
    p={userId:randomUUID(),deviceId:randomUUID(),sessionId:randomUUID()};

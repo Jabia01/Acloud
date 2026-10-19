@@ -1,6 +1,6 @@
 import {betaConfiguration} from '../beta/config';
 import {limitSetting} from '../hardening/config';
-import { BadRequestException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { DatabaseService } from '../database.service';
@@ -72,7 +72,7 @@ export class AuthService {
       if (!user || user.status !== 'ACTIVE' || user.privacy_state !== 'ACTIVE') throw new UnauthorizedException(INVALID);
       // Reset might have changed the password while expensive verification ran.
       if (user.password_hash !== candidate.password_hash) throw new UnauthorizedException(INVALID);
-      if(Number((await client.query('SELECT count(*) n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[user.id])).rows[0].n)>=limitSetting('MAX_ACTIVE_SESSIONS',10,1000))throw new UnauthorizedException(INVALID);
+      if(Number((await client.query('SELECT count(*) n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[user.id])).rows[0].n)>=limitSetting('MAX_ACTIVE_SESSIONS',10,1000))throw new ConflictException('Session limit reached. Sign out of another browser or device, then try again.');
       let deviceId: string | null = null;
       if (device) {
         try { deviceId = await this.upsertDevice(client, user.id, device); }

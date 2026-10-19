@@ -12,6 +12,7 @@ export class BillingRateLimit implements CanActivate {private buckets=new Map<st
 @Controller('billing')
 export class BillingController{
  constructor(@Inject(BillingService)private readonly service:BillingService){}
+ @Get('status')status(){return this.service.status();}
  @Get('plans')plans(){return this.service.plans();}
  @Get('subscription')@UseGuards(SessionGuard)current(@Req()r:AuthRequest){return this.service.current(r.principal);}
  @Get('history')@UseGuards(SessionGuard)history(@Req()r:AuthRequest,@Query()q:Record<string,unknown>){return this.service.history(r.principal,q);}
