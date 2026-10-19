@@ -332,6 +332,7 @@ enum AcloudPreviewFailureMessage {
             case .http(let status):reason="The server returned HTTP \(status). Try again later."
             case .unsupported:reason="A thumbnail is unavailable for this file type or size."
             case .integrity,.versionChanged:reason="The saved file could not be verified. No preview was created."
+            case .storage:reason="The app could not validate its temporary preview folder. No preview was created."
             default:reason="The saved preview could not be loaded."
             }
         } else if let failure=error as? AccountAPIError {
