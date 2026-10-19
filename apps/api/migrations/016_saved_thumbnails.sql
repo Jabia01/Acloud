@@ -24,6 +24,10 @@ DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='backup_beta_runtime') THEN
   GRANT SELECT,INSERT,DELETE ON saved_thumbnails TO backup_beta_runtime;
  END IF;
+ IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='backup_beta_worker') THEN
+  GRANT DELETE ON saved_thumbnails TO backup_beta_worker;
+  GRANT SELECT(asset_id,user_id) ON saved_thumbnails TO backup_beta_worker;
+ END IF;
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='backup_beta_operator') THEN
   REVOKE ALL ON saved_thumbnails FROM backup_beta_operator;
  END IF;

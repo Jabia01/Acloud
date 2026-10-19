@@ -11,3 +11,5 @@ Native app automatically checks the local account/asset/source-checksum cache fi
 No push or hosted migration is implied by implementation. Deployment must include additive migration 016 before enabling hosted use; verify on-device small-download/cache behavior separately.
 
 Native local capture retains its existing 256 MiB original-size safety bound. Originals above that bound and unsupported preservation formats do not gain an automatic full-original fallback. Synchronization covers the currently loaded protected transfer page and retries opportunistically while the app runs; this is not an always-running background migration of all older backups. The current website preview remains its separately bounded, explicit viewing flow.
+
+The lifecycle worker receives DELETE plus SELECT of asset_id/user_id only, so deletion jobs can purge derivatives without reading JPEG bytes. Runtime and independent backup access follow the existing dedicated-role model.
