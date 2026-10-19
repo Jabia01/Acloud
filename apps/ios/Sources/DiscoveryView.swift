@@ -366,11 +366,12 @@ private struct AcloudGallerySavedImage:View {
     var body:some View {AcloudGallerySavedImageContent(loader:AcloudPreviewRegistry.shared.loader(account:account,asset:asset,checksum:checksum),account:account,asset:asset,checksum:checksum,side:side)}
 }
 private struct AcloudGallerySavedImageContent:View {
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var loader:AcloudPreviewLoader
     let account:UUID,asset:UUID
     let checksum:String?
     let side:CGFloat
-    var body:some View {AcloudPreviewImage(loader:loader,side:side).task{await loader.load(account:account,asset:asset,checksum:checksum)}}
+    var body:some View {AcloudPreviewImage(loader:loader,side:side).task(id:account.uuidString+asset.uuidString+(checksum ?? "")+String(describing:scenePhase)){if scenePhase == .active{await loader.load(account:account,asset:asset,checksum:checksum)}}}
 }
 struct AcloudGalleryViewer:View {
     let items:[AcloudGalleryEntry]

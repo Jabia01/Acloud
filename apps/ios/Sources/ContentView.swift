@@ -207,12 +207,14 @@ struct AcloudMediaHeader:View {
     }
 }
 struct AcloudLocalThumbnail:UIViewRepresentable {
+    @Environment(\.scenePhase) private var scenePhase
     let localID:String?
     @Binding var captureDate:Date?
     var revision:Date?=nil
     var targetSize:CGFloat=320
     final class Coordinator {
         var identity:String?
+        var displayedIdentity:String?
         var token=UUID()
         var request:PHImageRequestID=PHInvalidImageRequestID
         let manager=PHImageManager.default()
@@ -232,9 +234,16 @@ struct AcloudLocalThumbnail:UIViewRepresentable {
         let status=PHPhotoLibrary.authorizationStatus(for:.readWrite)
         let identity=(localID ?? "none")+"|"+String(status.rawValue)+"|"+String(revision?.timeIntervalSince1970 ?? 0)+"|"+String(Double(targetSize))
         let coordinator=context.coordinator
+        guard status == .authorized || status == .limited else {
+            coordinator.manager.cancelImageRequest(coordinator.request);coordinator.token=UUID();coordinator.identity=nil;coordinator.displayedIdentity=nil;view.image=nil;return
+        }
+        guard scenePhase == .active else {
+            coordinator.manager.cancelImageRequest(coordinator.request);coordinator.token=UUID();coordinator.identity=nil;return
+        }
         guard identity != coordinator.identity else{return}
         coordinator.manager.cancelImageRequest(coordinator.request)
-        coordinator.identity=identity;coordinator.token=UUID();view.image=nil
+        coordinator.identity=identity;coordinator.token=UUID()
+        if coordinator.displayedIdentity != identity{view.image=nil}
         let token=coordinator.token
         let asset:PHAsset?=(status == .authorized || status == .limited) ? localID.flatMap{PHAsset.fetchAssets(withLocalIdentifiers:[$0],options:nil).firstObject}:nil
         let binding=$captureDate
@@ -242,7 +251,7 @@ struct AcloudLocalThumbnail:UIViewRepresentable {
         guard let asset else{return}
         let options=PHImageRequestOptions();options.isNetworkAccessAllowed=false;options.deliveryMode = .opportunistic;options.resizeMode = .fast
         coordinator.request=coordinator.manager.requestImage(for:asset,targetSize:CGSize(width:targetSize,height:targetSize),contentMode:.aspectFill,options:options){[weak view,weak coordinator] image,_ in
-            DispatchQueue.main.async {guard let coordinator,coordinator.token==token else{return};view?.image=image}
+            DispatchQueue.main.async {guard let coordinator,coordinator.token==token,let image else{return};coordinator.displayedIdentity=identity;view?.image=image}
         }
     }
     static func dismantleUIView(_ view:UIImageView,coordinator:Coordinator) {
@@ -372,13 +381,13 @@ enum AcloudPreviewFailureMessage {
         return try HTTPRestoreAPI(base:base,tokens:tokens,allowLocalHTTP:_isDebugAssertConfiguration())
     }
     func load(account:UUID,asset:UUID,checksum:String?,download:Bool=false)async {
-        guard !loading else{return};let epoch=generation;loading=true;defer{if epoch==generation{loading=false}}
+        guard !loading else{return};if !download,data != nil{return};let epoch=generation;loading=true;defer{if epoch==generation{loading=false}}
         var step="checking access"
         if download {message=nil;previewBytes=0;previewSize=0;previewStage="Checking access"}
         do {
             if let checksum,!download {
                 let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:checksum)
-                try Task.checkCancellation();guard epoch==generation else{return};data=cached
+                try Task.checkCancellation();guard epoch==generation else{return};if let cached{data=cached}
                 return
             }
             let api=try await connection(account:account)
@@ -425,13 +434,26 @@ private struct AcloudSavedThumbnail:View {
     let account:UUID,asset:UUID
     let checksum:String?
     @ObservedObject private var registry=AcloudPreviewRegistry.shared
-    var body:some View {AcloudPreviewImage(loader:registry.loader(account:account,asset:asset,checksum:checksum))}
+    var body:some View {AcloudSavedThumbnailContent(loader:registry.loader(account:account,asset:asset,checksum:checksum),account:account,asset:asset,checksum:checksum)}
+}
+private struct AcloudSavedThumbnailContent:View {
+    @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject var loader:AcloudPreviewLoader
+    let account:UUID,asset:UUID
+    let checksum:String?
+    var body:some View {
+        AcloudPreviewImage(loader:loader).task(id:account.uuidString+asset.uuidString+(checksum ?? "")+String(describing:scenePhase)){if scenePhase == .active{await loader.load(account:account,asset:asset,checksum:checksum)}}
+    }
 }
 struct AcloudPreviewImage:View {
     @ObservedObject var loader:AcloudPreviewLoader
     var side:CGFloat=76
     var body:some View {
-        if let data=loader.data,let image=UIImage(data:data) {Image(uiImage:image).resizable().scaledToFill().frame(width:side,height:side).clipped().clipShape(RoundedRectangle(cornerRadius:12))}
+        // Keep a real view mounted while the disk read starts; EmptyView can prevent a gallery .task from running.
+        ZStack {
+            Color.clear
+            if let data=loader.data,let image=UIImage(data:data) {Image(uiImage:image).resizable().scaledToFill()}
+        }.frame(width:side,height:side).clipped().clipShape(RoundedRectangle(cornerRadius:12))
     }
 }
 @MainActor final class AcloudPreviewRegistry:ObservableObject {

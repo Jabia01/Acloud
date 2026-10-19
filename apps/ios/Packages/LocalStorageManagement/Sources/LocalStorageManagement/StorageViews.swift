@@ -10,6 +10,10 @@ public enum CleanupCopy {
  public static let cloudUsage="Removing Photos items does not reduce Acloud cloud storage usage. Space reclaimed by iOS may differ from this estimate and may not be immediate."
 }
 @MainActor public final class StorageManagementModel:ObservableObject {
+ @Published public var summaryRefreshing=false
+ @Published public var summaryUpdatedAt:Date?
+ @Published public var summaryMessage=""
+ private var summarySession:String?
  @Published public var cloud:CloudStorageSummary?
  @Published public var plan="Unavailable"
  @Published public var message="Sign in to view storage."
@@ -30,8 +34,26 @@ public enum CleanupCopy {
  public func configure(context:CleanupContext,gate:CleanupGate,store:LocalCleanupStore,library:any LocalPhotoLibrary,server:any CleanupServer,recordRemoval:@escaping @Sendable(CleanupCandidate) async throws -> Void={_ in},recordReappearance:@escaping @Sendable(CleanupCandidate) async throws -> Void={_ in}){
   self.context=context;self.store=store;self.library=library;coordinator=LocalCleanupCoordinator(context:context,gate:gate,store:store,library:library,server:server,recordRemoval:recordRemoval,recordReappearance:recordReappearance);enabled=gate.allows
  }
- public func invalidate() async{workflowGeneration=UUID();await coordinator?.invalidateAccount();coordinator=nil;context=nil;store=nil;library=nil;candidates=[];selected=[];history=[];cloud=nil;enabled=false;reviewReady=false;message="Cleanup requires a new signed-in review."}
- public func background() async{workflowGeneration=UUID();await coordinator?.background();reviewReady=false}
+ // A session binding stays in memory only. A different/missing session clears the old account before any network request.
+ public func beginSummaryRefresh(session:String?,force:Bool=false,now:Date=Date()) async -> UUID? {
+  if session == nil || summarySession != session {
+   let previous=resetSession();summarySession=session;let epoch=workflowGeneration
+   await previous?.invalidateAccount()
+   guard epoch==workflowGeneration,summarySession==session else{return nil}
+  }
+  guard session != nil,!summaryRefreshing,!busy else{return nil}
+  if !force,cloud != nil,let updated=summaryUpdatedAt,now.timeIntervalSince(updated)<60{return nil}
+  summaryRefreshing=true;summaryMessage="";return workflowGeneration
+ }
+ public func finishSummaryRefresh(_ cloud:CloudStorageSummary,plan:String,generation:UUID,now:Date=Date()) {
+  guard workflowGeneration==generation else{return};self.cloud=cloud;self.plan=plan;summaryUpdatedAt=now;summaryMessage=""
+ }
+ public func endSummaryRefresh(generation:UUID,message:String?=nil) {
+  guard workflowGeneration==generation else{return};summaryRefreshing=false;if let message{summaryMessage=message}
+ }
+ private func resetSession()->LocalCleanupCoordinator?{workflowGeneration=UUID();let previous=coordinator;coordinator=nil;context=nil;store=nil;library=nil;candidates=[];selected=[];history=[];cloud=nil;enabled=false;reviewReady=false;summarySession=nil;summaryRefreshing=false;summaryUpdatedAt=nil;summaryMessage="";message="Cleanup requires a new signed-in review.";return previous}
+ public func invalidate() async{let previous=resetSession();await previous?.invalidateAccount()}
+ public func background() async{workflowGeneration=UUID();summaryRefreshing=false;await coordinator?.background();reviewReady=false}
  public func foreground(){coordinator?.resumeForeground()}
  public func refresh() async{
   guard let store,let library,let context else{return};let epoch=workflowGeneration

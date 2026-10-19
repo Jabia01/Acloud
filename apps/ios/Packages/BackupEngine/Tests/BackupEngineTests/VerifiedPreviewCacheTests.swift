@@ -33,6 +33,16 @@ final class VerifiedPreviewCacheTests:XCTestCase {
   let permissions=try FileManager.default.attributesOfItem(atPath:file.path)[.posixPermissions] as? Int
   XCTAssertEqual(permissions,0o600)
  }
+ func testSavedPreviewCanBeReloadedByNewCacheInstance()async throws {
+  let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+  let source=root.appendingPathComponent("generated.png"),directory=root.appendingPathComponent("cache"),account=UUID(),asset=UUID()
+  try fixture(source,red:1);let proof=try StreamingIntegrity.inspect(source)
+  let first=try await VerifiedPreviewCache(directory:directory).capture(file:source,account:account,asset:asset,checksum:proof.checksum,size:proof.sizeBytes,mediaType:"image")
+  try FileManager.default.removeItem(at:source)
+  let reloaded=try await VerifiedPreviewCache(directory:directory).cached(account:account,asset:asset,checksum:proof.checksum)
+  XCTAssertEqual(first,reloaded,"Reopening the gallery must use the saved-version thumbnail without a source or download")
+ }
  func testCorruptInputDoesNotCreateThumbnail()async throws {
   let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
