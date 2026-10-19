@@ -1,3 +1,4 @@
+import {thumbnailInput,thumbnailAccountBudget} from './thumbnail-policy';
 import {requirePreviewResource} from './preview-policy';
 import {ownerTestConfigured,ownerTestAsset,ownerTestRestoreIds,ownerTestTTL} from '../beta/owner-test';
 import {Inject,Injectable,ForbiddenException,NotFoundException,ConflictException,UnauthorizedException,BadRequestException,ServiceUnavailableException,HttpException} from '@nestjs/common';
@@ -20,10 +21,10 @@ export function protectedVersion(r:Record<string,unknown>){return createHash('sh
  async evidence(p:Principal,id:string,manifestId?:string){if(!p.deviceId)throw new ForbiddenException('Device session required');return this.db.transaction(async c=>{await this.lock(c,p);await this.gate(c,p,id);await this.manifestPolicy(c,p,id,manifestId);return this.projection(await this.asset(c,p,id));});}
  async authorize(p:Principal,id:string,value:unknown,manifestId?:string){if(!p.deviceId)throw new ForbiddenException('Device session required');const version=this.input(value);return this.db.transaction(async c=>{await this.lock(c,p);await this.gate(c,p,id);await this.manifestPolicy(c,p,id,manifestId);const r=await this.asset(c,p,id);if(protectedVersion(r)!==version)throw new ConflictException('Protected version changed');const metadata=await this.storage.getObjectMetadata(r.storage_object_key,r.storage_version_id);if(!metadata||metadata.sizeBytes!==Number(r.verified_size_bytes)||metadata.versionId!==r.storage_version_id)throw new ConflictException('Protected object unavailable');const authorization=await this.storage.createDownloadAuthorization(r.storage_object_key,r.storage_version_id,ownerTestTTL(downloadTTL()));return{evidence:this.projection(r),authorization};});}
  async recheck(p:Principal,id:string,value:unknown){const version=this.input(value);const evidence=await this.evidence(p,id);if(evidence.cloudVersionId!==version)throw new ConflictException('Protected version changed');return evidence;}
- private async previewAsset(c:PoolClient,p:Principal,id:string){
+ private async previewAsset(c:PoolClient,p:Principal,id:string,maximumBytes?:number){
   await this.lock(c,p);await this.gate(c,p,id);const r=await this.asset(c,p,id);
   const resources=(await c.query("SELECT m.kind,m.protection_state,m.source_changed,m.integrity_degraded,m.review_required,r.role,r.expected_size,r.expected_sha256 FROM media_manifest_resources r JOIN media_manifest_summary m ON m.id=r.manifest_id WHERE r.asset_id=$1 AND r.user_id=$2 AND m.user_id=$2",[id,p.userId])).rows;
-  requirePreviewResource(r,resources);return r;
+  requirePreviewResource(r,resources,maximumBytes);return r;
  }
  private previewProjection(r:any){return{...this.projection(r),resourcePolicy:'VERIFIED_PREVIEW_RESOURCE' as const};}
  async previewEvidence(p:Principal,id:string){if(!p.deviceId)throw new ForbiddenException('Device session required');return this.db.transaction(async c=>this.previewProjection(await this.previewAsset(c,p,id)));}
@@ -37,6 +38,27 @@ export function protectedVersion(r:Record<string,unknown>){return createHash('sh
   });
  }
  async previewRecheck(p:Principal,id:string,value:unknown){const version=this.input(value),proof=await this.previewEvidence(p,id);if(proof.cloudVersionId!==version)throw new ConflictException('Protected version changed');return proof;}
+ private thumbnailProjection(r:any){return{assetId:r.asset_id,cloudVersionId:r.cloud_version_id,sourceSha256:r.source_sha256,thumbnailSha256:r.thumbnail_sha256,mimeType:'image/jpeg',width:r.width,height:r.height,dataBase64:r.jpeg.toString('base64')};}
+ async thumbnailEvidence(p:Principal,id:string){if(!p.deviceId)throw new ForbiddenException('Device session required');return this.db.transaction(async c=>this.previewProjection(await this.previewAsset(c,p,id,10*1024*1024*1024)));}
+ async thumbnail(p:Principal,id:string){
+  if(!p.deviceId)throw new ForbiddenException('Device session required');
+  return this.db.transaction(async c=>{const asset=await this.previewAsset(c,p,id,10*1024*1024*1024);
+   const row=(await c.query('SELECT * FROM saved_thumbnails WHERE asset_id=$1 AND user_id=$2 AND cloud_version_id=$3 AND source_sha256=$4',[id,p.userId,protectedVersion(asset),asset.expected_checksum])).rows[0];
+   if(!row)throw new NotFoundException('Thumbnail unavailable');return this.thumbnailProjection(row);
+  });
+ }
+ async saveThumbnail(p:Principal,id:string,value:unknown){
+  if(!p.deviceId)throw new ForbiddenException('Device session required');const input=thumbnailInput(value);
+  return this.db.transaction(async c=>{const asset=await this.previewAsset(c,p,id,10*1024*1024*1024);
+   if(protectedVersion(asset)!==input.version||asset.expected_checksum!==input.source)throw new ConflictException('Saved version changed');
+   const existing=(await c.query('SELECT * FROM saved_thumbnails WHERE asset_id=$1 AND user_id=$2',[id,p.userId])).rows[0];
+   if(existing){if(existing.cloud_version_id!==input.version||existing.source_sha256!==input.source)throw new ConflictException('Saved version changed');return{stored:true};}
+   const usage=(await c.query("SELECT COALESCE(sum(octet_length(jpeg)),0)::bigint bytes,count(*) FILTER(WHERE created_at>now()-interval '1 hour')::int recent FROM saved_thumbnails WHERE user_id=$1",[p.userId])).rows[0];
+   if(Number(usage.bytes)+input.bytes.length>thumbnailAccountBudget||Number(usage.recent)>=600)throw new HttpException('Thumbnail budget reached',429);
+   await c.query('INSERT INTO saved_thumbnails(asset_id,user_id,cloud_version_id,source_sha256,thumbnail_sha256,jpeg,width,height) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[id,p.userId,input.version,input.source,createHash('sha256').update(input.bytes).digest('hex'),input.bytes,input.width,input.height]);
+   return{stored:true};
+  });
+ }
  private input(value:unknown){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length!==1||!('cloudVersionId' in value)||typeof value.cloudVersionId!=='string'||!/^[a-f0-9]{64}$/.test(value.cloudVersionId))throw new BadRequestException('Pinned version required');return value.cloudVersionId;}
  async event(p:Principal,value:any){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!['code','durationMs','retryCount'].includes(k))||!['REQUESTED','DOWNLOAD_OK','DOWNLOAD_FAILED','CHECKSUM_FAILED','SAVE_FAILED','COMPLETED','CLEANUP_FAILED'].includes(value.code)||!Number.isInteger(value.retryCount)||value.retryCount<0||value.retryCount>100||value.durationMs!==undefined&&(!Number.isInteger(value.durationMs)||value.durationMs<0||value.durationMs>86400000))throw new BadRequestException();return this.db.transaction(async c=>{await this.lock(c,p);const recent=await c.query("SELECT count(*)::int n FROM restore_events WHERE user_id=$1 AND created_at>now()-interval '1 minute'",[p.userId]);if(recent.rows[0].n>=120)throw new HttpException('Restore telemetry rate limited',429);await c.query('INSERT INTO restore_events(id,user_id,code,duration_ms,retry_count) VALUES($1,$2,$3,$4,$5)',[randomUUID(),p.userId,value.code,value.durationMs??null,value.retryCount]);return{recorded:true};});}
 }

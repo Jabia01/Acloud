@@ -43,6 +43,21 @@ final class VerifiedPreviewCacheTests:XCTestCase {
   let reloaded=try await VerifiedPreviewCache(directory:directory).cached(account:account,asset:asset,checksum:proof.checksum)
   XCTAssertEqual(first,reloaded,"Reopening the gallery must use the saved-version thumbnail without a source or download")
  }
+ func testSmallCloudDerivativeIsDecodedAndCachedWithoutOriginal()async throws {
+  let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+  let source=root.appendingPathComponent("generated.png"),account=UUID(),asset=UUID(),cache=VerifiedPreviewCache(directory:root.appendingPathComponent("first"))
+  try fixture(source,red:1);let proof=try StreamingIntegrity.inspect(source)
+  let data=try await cache.capture(file:source,account:account,asset:asset,checksum:proof.checksum,size:proof.sizeBytes,mediaType:"image")
+  XCTAssertLessThanOrEqual(data.count,40*1024)
+  let destination=VerifiedPreviewCache(directory:root.appendingPathComponent("second"))
+  try await destination.storeThumbnail(data,account:account,asset:asset,checksum:proof.checksum)
+  let loaded=try await destination.cached(account:account,asset:asset,checksum:proof.checksum)
+  XCTAssertEqual(loaded,data)
+  do{try await destination.storeThumbnail(Data("generated invalid thumbnail".utf8),account:account,asset:asset,checksum:proof.checksum);XCTFail("Invalid bytes must be rejected")}catch{}
+  let retained=try await destination.cached(account:account,asset:asset,checksum:proof.checksum)
+  XCTAssertEqual(retained,data)
+ }
  func testCorruptInputDoesNotCreateThumbnail()async throws {
   let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}

@@ -201,6 +201,17 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
     summary=counts;items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil
    }
    await reconcileManifests();try connectionGate.validate(generation);await observeTransferAlerts()
+   if let account=previewAccount {
+    let entries=items.compactMap{item -> (UUID,String)? in
+     guard item.state == .protected,["image","video"].contains(item.mediaType),let asset=item.assetID,let checksum=item.expectedChecksum else{return nil}
+     if let binding=item.mediaResourceBinding {
+      guard let manifest=manifests.first(where:{$0.id==binding.manifestID}),[.fullyProtected,.restoreReady].contains(manifest.state),
+       manifest.required.contains(where:{$0.id==item.id && [.still,.video,.edited].contains($0.descriptor.role)}) else{return nil}
+     }
+     return(asset,checksum)
+    }
+    AcloudThumbnailPublisher.sync(account:account,entries:entries)
+   }
   }catch is CancellationError {}catch{message="Backup connector unavailable. Device acceptance is pending."}
  }
 

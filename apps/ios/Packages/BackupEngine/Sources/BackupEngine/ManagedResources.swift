@@ -74,6 +74,24 @@ public enum BackupPreviewPolicy {
  }
 }
 
+// Strip display-irrelevant metadata from derived JPEGs; never modify the original resource.
+public enum PreviewJPEG {
+ public static func withoutMetadata(_ data:Data)throws->Data {
+  let bytes=[UInt8](data);guard bytes.count>=4,bytes[0]==255,bytes[1]==216 else{throw BackupFailure.unsupported}
+  var output=Data(bytes.prefix(2)),offset=2
+  while offset+4<=bytes.count {
+   let start=offset;guard bytes[offset]==255 else{throw BackupFailure.unsupported};offset+=1
+   while offset<bytes.count,bytes[offset]==255{offset+=1}
+   guard offset+2<bytes.count else{throw BackupFailure.unsupported};let marker=bytes[offset];offset+=1
+   if marker==218{output.append(contentsOf:bytes[start...]);return output}
+   let length=Int(bytes[offset])*256+Int(bytes[offset+1]);guard length>=2,offset+length<=bytes.count else{throw BackupFailure.unsupported}
+   if ![225,237,254].contains(marker){output.append(contentsOf:bytes[start..<(offset+length)])}
+   offset+=length
+  }
+  throw BackupFailure.unsupported
+ }
+}
+
 #if canImport(ImageIO) && canImport(AVFoundation)
 import ImageIO
 import AVFoundation
@@ -98,6 +116,20 @@ public actor VerifiedPreviewCache {
               let size=try url.resourceValues(forKeys:[.fileSizeKey]).fileSize,size>0,size<=256*1024 else{return nil}
         return try Data(contentsOf:url)
     }
+    // Cloud derivatives are authenticated/version-bound by the caller, then decoded and bounded here.
+    public func storeThumbnail(_ data:Data,account:UUID,asset:UUID,checksum:String)throws {
+        guard data.count<=40*1024,let source=CGImageSourceCreateWithData(data as CFData,nil),CGImageSourceGetType(source) as String? == "public.jpeg",
+              let properties=CGImageSourceCopyPropertiesAtIndex(source,0,nil) as? [CFString:Any],
+              let width=properties[kCGImagePropertyPixelWidth] as? Int,let height=properties[kCGImagePropertyPixelHeight] as? Int,
+              (1...240).contains(width),(1...240).contains(height),CGImageSourceCreateImageAtIndex(source,0,nil) != nil else{throw BackupFailure.unsupported}
+        let url=try file(account:account,asset:asset,checksum:checksum)
+        #if os(iOS)
+        try data.write(to:url,options:[.atomic,.completeFileProtection])
+        #else
+        try data.write(to:url,options:.atomic)
+        #endif
+        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path);trimCache()
+    }
     public func capture(file source:URL,account:UUID,asset:UUID,checksum:String,size:Int,mediaType:String)async throws->Data {
         guard size>0,size<=BackupPreviewPolicy.maximumLocalBytes else{throw BackupFailure.unsupported}
         guard try source.resourceValues(forKeys:[.fileSizeKey,.isSymbolicLinkKey]).isSymbolicLink != true,try source.resourceValues(forKeys:[.fileSizeKey]).fileSize==size else{throw BackupFailure.sourceChanged}
@@ -115,11 +147,15 @@ public actor VerifiedPreviewCache {
             let generator=AVAssetImageGenerator(asset:AVURLAsset(url:link));generator.appliesPreferredTrackTransform=true;generator.maximumSize=CGSize(width:240,height:240)
             image=try await generator.image(at:.zero).image
         } else {throw BackupFailure.unsupported}
-        guard let output=CFDataCreateMutable(nil,0),let destination=CGImageDestinationCreateWithData(output,"public.jpeg" as CFString,1,nil) else{throw BackupFailure.unsupported}
-        CGImageDestinationAddImage(destination,image,[kCGImageDestinationLossyCompressionQuality:0.75] as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else{throw BackupFailure.unsupported}
-        let data=output as Data
-        guard data.count<=256*1024 else{throw BackupFailure.unsupported}
+        var encoded:Data?
+        for quality in [0.75,0.55,0.35,0.15] {
+            guard let output=CFDataCreateMutable(nil,0),let destination=CGImageDestinationCreateWithData(output,"public.jpeg" as CFString,1,nil) else{throw BackupFailure.unsupported}
+            CGImageDestinationAddImage(destination,image,[kCGImageDestinationLossyCompressionQuality:quality] as CFDictionary)
+            guard CGImageDestinationFinalize(destination) else{throw BackupFailure.unsupported}
+            if CFDataGetLength(output)<=40*1024{encoded=output as Data;break}
+        }
+        guard let encoded else{throw BackupFailure.unsupported}
+        let data=try PreviewJPEG.withoutMetadata(encoded)
         try Task.checkCancellation()
         let url=try file(account:account,asset:asset,checksum:checksum)
         #if os(iOS)

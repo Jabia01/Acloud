@@ -9,3 +9,10 @@ GRANT INSERT ON backup_beta.security_audit TO backup_beta_operator;
 GRANT SELECT ON backup_beta.security_audit,backup_beta.internal_admin_audit,backup_beta.beta_admission_audit TO backup_beta_auditreader;
 -- Reapply reviewed grants after additive migrations; do not grant ownership/BYPASSRLS
 -- or blanket operator UPDATE on user/assets/object state. External IAM review required.
+-- Derivative image bytes are customer data, not staff-console metadata.
+DO $$ BEGIN
+ IF to_regclass('backup_beta.saved_thumbnails') IS NOT NULL THEN
+  REVOKE ALL ON backup_beta.saved_thumbnails FROM backup_beta_operator,backup_beta_auditreader;
+  REVOKE UPDATE ON backup_beta.saved_thumbnails FROM backup_beta_runtime;
+ END IF;
+END $$;
