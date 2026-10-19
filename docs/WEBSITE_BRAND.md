@@ -1,10 +1,13 @@
-# Acloud website brand colours
+# Acloud brand colours
 
-The owner requested a clear blue throughout the website, superseding the earlier teal interpretation of the native accent.
+The owner’s reference is the original app’s muted blue. Apply this palette across the public website, signed-in customer pages and staff console. The app’s original palette must remain unchanged.
 
-- Primary blue: **#0066CC**. White button labels meet WCAG AA contrast.
-- Deep blue: **#123C73**.
-- Pale blue: **#E8F2FF**.
+- Primary blue: **#1F6675**, matching native RGB(0.12, 0.40, 0.46) after 8-bit rounding.
+- Deep banner blue: **#14384F**, matching native RGB(0.08, 0.22, 0.31).
+- Pale blue: **#E9F3F5**.
+- Hover blue: **#174E5A**.
 - CSS tokens: `--brand` and `--brand-deep` in `apps/web/app/styles.css`.
 
-Apply blue to actions, navigation, banners, illustrations and healthy-state accents. Keep warning/error colours distinct and always accompany statuses with text. Colour never grants protection or implies unverified health. Native app tint now uses RGB(0, 0.40, 0.80), matching #0066CC; its banner companion uses the matching deep-blue palette.
+White labels on the primary blue meet WCAG AA contrast. Use the primary/deep gradient for website banners, matching the reference. Keep warning/error colours distinct and pair status colours with text. Colour never grants protection or implies unverified health.
+
+The earlier #0066CC website palette and native recolour were an incorrect interpretation and are superseded. Preserve all usability improvements when restoring the app colours.

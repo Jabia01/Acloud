@@ -20,7 +20,7 @@
 
 ## Native app
 
-- Clear-blue tint; On device and Saved tab labels; recent transfer saves link to the protected library.
+- Original muted-blue tint retained; On device and Saved tab labels; recent transfer saves link to the protected library.
 - Direct recovery link and password visibility toggle.
 - Binary storage units and resource-file explanation.
 - Saved-preview byte/stage progress, cancellation and zoom/pan/reset controls for photos.

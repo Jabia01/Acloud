@@ -53,7 +53,7 @@ struct ContentView: View {
 
 // Shared presentation only. These views never grant protection or change transfer state.
 enum AcloudStyle {
-    static let accent = Color(red:0, green:0.40, blue:0.80)
+    static let accent = Color(red:0.12, green:0.40, blue:0.46)
     static let canvas = Color(uiColor:.systemGroupedBackground)
 }
 
@@ -73,7 +73,7 @@ struct AcloudHero:View {
         }
         .frame(maxWidth:.infinity,alignment:.leading).padding(24)
         .foregroundStyle(.white)
-        .background(LinearGradient(colors:[AcloudStyle.accent,Color(red:0.07,green:0.24,blue:0.45)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:24))
+        .background(LinearGradient(colors:[AcloudStyle.accent,Color(red:0.08,green:0.22,blue:0.31)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:24))
     }
 }
 
