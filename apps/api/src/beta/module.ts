@@ -1,3 +1,4 @@
+import {ownerPaymentTestConfiguration} from '../../../../infrastructure/railway/owner-payment-test.cjs';
 import {ownerReadOnlyConfiguration,allowOwnerReadOnlyRequest} from '../admin/owner-read-only';
 import {ownerTestConfigured} from './owner-test';
 import {UploadModule} from '../uploads/upload.module';
@@ -13,7 +14,7 @@ import {Body,Controller,Get,Global,Inject,Module,Param,Post,Req,UseGuards,UseInt
  if(!row)throw new ForbiddenException();
  await this.policy.upload({userId:row.user_id,sessionId:row.id,deviceId:row.device_id});
  }
- if(method==='POST'&&(path==='/billing/checkout'||path.startsWith('/storage/free-up-space')))throw new ForbiddenException('Beta backup disabled');if(path.startsWith('/internal/'))await this.policy.gates(['STAFF_MFA']);if(method==='POST'&&path.endsWith('/download'))await this.policy.open('downloads');}return true;}
+ if(method==='POST'&&(path==='/billing/checkout'&&!ownerPaymentTestConfiguration()?.active||path.startsWith('/storage/free-up-space')))throw new ForbiddenException('Beta backup disabled');if(path.startsWith('/internal/'))await this.policy.gates(['STAFF_MFA']);if(method==='POST'&&path.endsWith('/download'))await this.policy.open('downloads');}return true;}
  if(path==='/auth/register')throw new ForbiddenException('Invitation required');if(path.startsWith('/internal/')&&process.env.NODE_ENV==='production')await this.policy.gates(['STAFF_MFA']);
  const routes:Record<string,string>={'/beta/redeem':'registration','/billing/checkout':'checkout','/privacy/deletion':'account_deletion','/privacy/export':'privacy_export'};if(method==='POST'&&routes[path])await this.policy.open(routes[path]!);
  if(method==='POST'&&path.startsWith('/internal/')&&!['/internal/login','/internal/auth/challenge','/internal/logout','/internal/beta/switch'].includes(path))await this.policy.open('admin_mutation');

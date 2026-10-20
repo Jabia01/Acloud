@@ -1,3 +1,4 @@
+import {ownerPaymentTestConfiguration} from './owner-payment-test.cjs';
 import {X509Certificate,randomUUID} from 'node:crypto';
 import {mkdir,writeFile,lstat,rename,unlink} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
@@ -8,7 +9,8 @@ export function check(e,role){
  if(!e.B2_BUCKET_NAME||e.B2_BUCKET_NAME==='acloud-prod-media'||e.B2_BUCKET_NAME!==e.BETA_EXPECTED_BUCKET)throw new Error('Separate explicitly bound staging bucket required');
  const db=new URL(e.DATABASE_URL);if(!db.hostname.endsWith('.supabase.co')&&!db.hostname.endsWith('.supabase.com'))throw new Error('Expected hosted Supabase database');
  if(db.pathname.slice(1)!==e.BETA_DATABASE_NAME||db.searchParams.get('sslmode')!=='verify-full')throw new Error('Explicit database binding and verified TLS required');
- for(const k of ['CUSTOMER_REGISTRATION_ENABLED','BETA_ENABLED','BETA_ALLOW_REAL_MEDIA','BETA_ALLOW_PAYMENTS','BETA_ALLOW_B2','BETA_ALLOW_FREE_UP_SPACE','BETA_ALLOW_SUPPORT_TOOLS','BILLING_ENABLED','ENABLE_FREE_UP_SPACE','ACCOUNT_DELETION_ENABLED','ACCOUNT_DELETION_EXECUTION_ENABLED','RETENTION_EXECUTION_ENABLED'])if(e[k]!=='false')throw new Error('Closed staging feature required: '+k);
+ const privatePayment=ownerPaymentTestConfiguration(e);
+ for(const k of ['CUSTOMER_REGISTRATION_ENABLED','BETA_ENABLED','BETA_ALLOW_REAL_MEDIA','BETA_ALLOW_PAYMENTS','BETA_ALLOW_B2','BETA_ALLOW_FREE_UP_SPACE','BETA_ALLOW_SUPPORT_TOOLS','BILLING_ENABLED','ENABLE_FREE_UP_SPACE','ACCOUNT_DELETION_ENABLED','ACCOUNT_DELETION_EXECUTION_ENABLED','RETENTION_EXECUTION_ENABLED'])if(!(k==='BILLING_ENABLED'&&privatePayment)&&e[k]!=='false')throw new Error('Closed staging feature required: '+k);
  if(e.NODE_TLS_REJECT_UNAUTHORIZED==='0')throw new Error('TLS verification must remain enabled');
  if(role==='api'){const p=Number(e.PORT??e.API_PORT);if(!Number.isInteger(p)||p<1||p>65535)throw new Error('Invalid API port');}
  if(role==='migrate'&&decodeURIComponent(db.username)!==e.BETA_MIGRATION_ROLE)throw new Error('Separate bound migration role required');

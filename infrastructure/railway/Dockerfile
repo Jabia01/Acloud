@@ -14,6 +14,7 @@ COPY apps/api/src apps/api/src
 COPY apps/api/tsconfig.json apps/api/tsconfig.json
 COPY apps/api/migrations apps/api/migrations
 COPY packages/shared packages/shared
+COPY infrastructure/railway/owner-payment-test.cjs infrastructure/railway/owner-payment-test.d.cts infrastructure/railway/
 RUN npm run build --workspace @backup/shared && npm run build --workspace @backup/api
 RUN npm prune --omit=dev --ignore-scripts
 FROM ${NODE_IMAGE} AS runtime
@@ -26,6 +27,6 @@ COPY --from=builder --chown=node:node /workspace/apps/api/migrations ./apps/api/
 COPY --from=builder --chown=node:node /workspace/apps/api/package.json ./apps/api/package.json
 COPY --from=builder --chown=node:node /workspace/packages/shared ./packages/shared
 COPY --chown=node:node scripts/migrate.mjs scripts/release-migrate.mjs scripts/run-durable-worker.mjs scripts/supervise-worker.mjs ./scripts/
-COPY --chown=node:node infrastructure/railway/start.mjs ./infrastructure/railway/start.mjs
+COPY --chown=node:node infrastructure/railway/start.mjs infrastructure/railway/owner-payment-test.cjs ./infrastructure/railway/
 USER node
 CMD ["node","infrastructure/railway/start.mjs","api"]

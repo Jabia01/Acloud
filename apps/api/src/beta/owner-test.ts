@@ -1,3 +1,4 @@
+import {ownerPaymentTestConfiguration} from '../../../../infrastructure/railway/owner-payment-test.cjs';
 import {createHash} from 'node:crypto';
 import {ForbiddenException, ConflictException} from '@nestjs/common';
 import type {PoolClient} from 'pg';
@@ -25,8 +26,9 @@ export function ownerTestConfigured(e:NodeJS.ProcessEnv=process.env){return e.OW
 export function ownerTestConfiguration(e:NodeJS.ProcessEnv=process.env){
   if(e.OWNER_DEVICE_TEST_ENABLED!==undefined&&!['true','false'].includes(e.OWNER_DEVICE_TEST_ENABLED))throw deny();
   if(!ownerTestConfigured(e))return null;
+  const privatePayment=ownerPaymentTestConfiguration(e);
   const off=['BETA_ENABLED','BETA_ALLOW_REAL_MEDIA','BETA_ALLOW_B2','BETA_ALLOW_PAYMENTS','BETA_ALLOW_FREE_UP_SPACE','BETA_ALLOW_SUPPORT_TOOLS','CUSTOMER_REGISTRATION_ENABLED','BILLING_ENABLED','ENABLE_FREE_UP_SPACE','ACCOUNT_DELETION_ENABLED','ACCOUNT_DELETION_EXECUTION_ENABLED','RETENTION_EXECUTION_ENABLED','RESTORE_ENABLED'];
-  if(e.NODE_ENV!=='production'||e.APP_ENV!=='staging'||e.STORAGE_ENVIRONMENT!=='staging'||e.STORAGE_PROVIDER!=='backblaze_b2'||off.some(k=>e[k]!=='false')||e.NODE_TLS_REJECT_UNAUTHORIZED==='0')throw deny();
+  if(e.NODE_ENV!=='production'||e.APP_ENV!=='staging'||e.STORAGE_ENVIRONMENT!=='staging'||e.STORAGE_PROVIDER!=='backblaze_b2'||off.some(k=>k==='BILLING_ENABLED'&&privatePayment ? false:e[k]!=='false')||e.NODE_TLS_REJECT_UNAUTHORIZED==='0')throw deny();
   if(!e.B2_BUCKET_NAME||e.B2_BUCKET_NAME==='acloud-prod-media'||e.B2_BUCKET_NAME!==e.BETA_EXPECTED_BUCKET||e.OWNER_DEVICE_TEST_RESOURCE_HASH!==ownerTestBinding(e))throw deny();
   for(const key of ['API_PUBLIC_ORIGIN','B2_S3_ENDPOINT']){const u=new URL(e[key]!);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw deny();}
   const profile=e.OWNER_DEVICE_TEST_PROFILE??'smoke';

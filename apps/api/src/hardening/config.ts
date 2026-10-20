@@ -1,3 +1,4 @@
+import {ownerPaymentTestConfiguration} from '../../../../infrastructure/railway/owner-payment-test.cjs';
 import {ownerReadOnlyConfiguration} from '../admin/owner-read-only';
 import {betaConfiguration} from '../beta/config';
 import {storageConfig} from '../uploads/storage-config';
@@ -7,6 +8,7 @@ function required(e:NodeJS.ProcessEnv,name:string){const v=e[name];if(!v||v.leng
 function origin(v:string|undefined){if(!v)throw new Error('Trusted HTTPS origin required');const u=new URL(v);if(u.protocol!=='https:'||u.username||u.password||u.pathname!=='/'||u.search||u.hash||u.hostname.endsWith('.invalid')||u.hostname==='localhost')throw new Error('Trusted HTTPS origin required');return u.origin;}
 export function validateConfiguration(e:NodeJS.ProcessEnv=process.env){
  betaConfiguration(e);
+ ownerPaymentTestConfiguration(e);
  ownerReadOnlyConfiguration(e);
  const mode=e.APP_ENV??e.NODE_ENV??'development';if(!['development','test','staging','production'].includes(mode))throw new Error('Invalid environment');
  if(e.NODE_ENV==='production'&&!['production','staging'].includes(mode))throw new Error('Environment mismatch');

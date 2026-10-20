@@ -46,3 +46,15 @@ Official references: https://paystack.com/docs/payments/webhooks/ , https://pays
 | 2 TB | 21,999 | 219,990 |
 
 Annual is ten monthly payments (two months free), billed annually. Paystack minor-unit values are exactly the figures above multiplied by100. Display catalogue source: apps/web/lib/approved-prices.ts. Prices are display-only until matching active server price rows, canonical provider plan codes and readiness/acceptance are configured. The UI blocks mismatched, missing or ambiguous provider prices. Do not insert invented Paystack plan codes or replace historical immutable price rows.
+
+## Private Paystack TEST profile — prepared 19 October 2026
+
+The owner supplied a TEST key through a private local file. The provider authenticated it and all fourteen approved monthly/annual TEST plans were created and canonically verified. Matching staging database prices were inserted **inactive**; no customer quota, checkout, transaction or subscription was created by plan setup.
+
+`OWNER_PAYMENT_TEST_ENABLED=true` permits a separately configured private payment exercise while the existing owner iPad media profile stays in place. It requires production runtime on isolated staging, the same owner account/resource binding, a TEST key, BILLING_ENABLED=true, all broad beta/live/destructive flags still false, and a payment window of at most 24 hours entirely inside the owner-device window. An expired payment window disables checkout and worker reconciliation without crashing media service restarts. Default behavior is unchanged when this profile is absent/false. It never records beta acceptance gates as PASS.
+
+Checkout/cancellation require the approved owner's live, verified, non-abusive **web** session; another account or native device cannot use this payment capability. Both checkout and billing-worker switches must remain open. Signed settlement and reconciliation are restricted to that same account while the profile is configured. Original media download/restore restrictions remain unchanged. TEST entitlements never authorize live customer billing. The ordinary beta and production-live flows keep their prior acceptance requirements.
+
+Activation requires publishing this code first, then installing the private profile variables on API and worker together, activating only the verified TEST price versions, and enabling the existing billing schedule. Do not enable BILLING_ENABLED on the older closed-staging image. Keep LIVE rows/keys untouched. Roll back by setting OWNER_PAYMENT_TEST_ENABLED=false **and** BILLING_ENABLED=false together on both services; optionally disable the billing schedule. Stop checkout and provider processing before closing an active test window manually.
+
+Acceptance: use the registered website account to purchase the 32 GB monthly TEST plan, verify signed webhook + independent transaction verification, confirm 32,000,000,000-byte entitlement replacement, replay safety, cancellation/reconciliation, and preservation of existing media. Browser return/success screens alone are not payment proof. User must explicitly complete the Paystack TEST card flow; no card details are stored by Acloud.

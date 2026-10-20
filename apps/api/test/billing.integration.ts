@@ -9,6 +9,7 @@ import request from 'supertest';
 import {AppModule} from '../src/app.module';
 import {BillingProvider,PaystackBillingProvider,type Price,type VerifiedPayment,type ProviderSubscription} from '../src/billing/provider';
 import {BillingService} from '../src/billing/service';
+import {ownerTestBinding} from '../src/beta/owner-test';
 import {periodEnd} from '../src/billing/entitlement';
 import {AuthRateLimit} from '../src/auth/rate-limit';
 import {AdminRateLimit} from '../src/admin/guard';
@@ -39,6 +40,28 @@ describe('billing authority: PostgreSQL and deterministic provider',{concurrency
  async function paid(code='STANDARD_64',interval='MONTHLY'){const co=await checkout(code,interval);await evidence(co);assert.equal((await hook('charge.success',{reference:co.provider_reference})).status,200);return co;}
  const current=async()=> (await get('/billing/subscription').expect(200)).body;
  async function staff(role:string){const id=randomUUID(),t=randomBytes(32).toString('base64url');await pool.query("INSERT INTO internal_admins(id,email,email_normalized,password_hash,role) VALUES($1,$2,$2,'generated-unused',$3)",[id,`${id}@example.invalid`,role]);await pool.query("INSERT INTO internal_admin_sessions(id,admin_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '15 minutes')",[randomUUID(),id,digest(t)]);return t;}
+ test('private TEST profile restricts checkout to the verified owner browser and settles a signed payment once',async()=>{
+  const previous={...process.env},device=randomUUID(),foreign=randomUUID(),foreignDevice=randomUUID(),foreignToken=randomBytes(32).toString('base64url');
+  try{
+   await pool.query('UPDATE users SET email_verified_at=now() WHERE id=$1',[user]);
+   await pool.query("INSERT INTO devices(id,user_id,device_identifier,display_name,platform) VALUES($1,$2,$3,'Generated web fixture','web')",[device,user,device]);
+   await pool.query('UPDATE sessions SET device_id=$2 WHERE id=$1',[session,device]);
+   await pool.query("INSERT INTO users(id,email,email_normalized,password_hash,email_verified_at) VALUES($1,$2,$2,'generated-unused',now())",[foreign,foreign+'@example.invalid']);
+   await pool.query("INSERT INTO devices(id,user_id,device_identifier,display_name,platform) VALUES($1,$2,$3,'Generated other browser','web')",[foreignDevice,foreign,foreignDevice]);
+   await pool.query("INSERT INTO sessions(id,user_id,token_hash,device_id,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 day')",[randomUUID(),foreign,digest(foreignToken),foreignDevice]);
+   const now=Date.now();Object.assign(process.env,{NODE_ENV:'production',APP_ENV:'staging',STORAGE_ENVIRONMENT:'staging',STORAGE_PROVIDER:'backblaze_b2',OWNER_DEVICE_TEST_ENABLED:'true',OWNER_DEVICE_TEST_PROFILE:'project',OWNER_DEVICE_TEST_ACCOUNT_ID:user,OWNER_DEVICE_TEST_DEVICE_ID:randomUUID(),OWNER_DEVICE_TEST_STARTS_AT:new Date(now-86400000).toISOString(),OWNER_DEVICE_TEST_EXPIRES_AT:new Date(now+86400000).toISOString(),OWNER_PAYMENT_TEST_ENABLED:'true',OWNER_PAYMENT_TEST_ACCOUNT_ID:user,OWNER_PAYMENT_TEST_STARTS_AT:new Date(now-60000).toISOString(),OWNER_PAYMENT_TEST_EXPIRES_AT:new Date(now+3600000).toISOString(),PAYSTACK_ENVIRONMENT:'TEST',B2_BUCKET_NAME:'generated-staging',BETA_EXPECTED_BUCKET:'generated-staging',API_PUBLIC_ORIGIN:'https://api.example.invalid',B2_S3_ENDPOINT:'https://s3.example.invalid'});
+   for(const k of ['BETA_ENABLED','BETA_ALLOW_REAL_MEDIA','BETA_ALLOW_PAYMENTS','BETA_ALLOW_B2','BETA_ALLOW_FREE_UP_SPACE','BETA_ALLOW_SUPPORT_TOOLS','CUSTOMER_REGISTRATION_ENABLED','ENABLE_FREE_UP_SPACE','ACCOUNT_DELETION_ENABLED','ACCOUNT_DELETION_EXECUTION_ENABLED','RETENTION_EXECUTION_ENABLED','RESTORE_ENABLED'])process.env[k]='false';
+   process.env.OWNER_DEVICE_TEST_RESOURCE_HASH=ownerTestBinding(process.env);process.env.OWNER_PAYMENT_TEST_RESOURCE_HASH=process.env.OWNER_DEVICE_TEST_RESOURCE_HASH;
+   assert.equal((await get('/billing/status').expect(200)).body.checkoutEnabled,true);
+   await post('/billing/checkout',choice(),randomUUID(),foreignToken).expect(403);
+   await request(app.getHttpServer()).post('/billing/checkout').send(choice()).expect(401);
+   const co=await checkout();await evidence(co);await hook('charge.success',{reference:co.provider_reference}).expect(200);await hook('charge.success',{reference:co.provider_reference}).expect(200);
+   assert.equal((await current()).quotaBytes,64e9);
+   assert.equal((await pool.query("SELECT count(*)::int n FROM billing_transactions WHERE user_id=$1 AND status='SUCCESS'",[user])).rows[0].n,1);
+   assert.equal((await pool.query('SELECT count(*)::int n FROM billing_checkouts WHERE user_id=$1',[foreign])).rows[0].n,0);
+   assert.equal((await pool.query("SELECT count(*)::int n FROM beta_acceptance WHERE status='PASS'")).rows[0].n,0);
+  }finally{for(const key of Object.keys(process.env))if(!(key in previous))delete process.env[key];Object.assign(process.env,previous)}
+ });
  test('new account FREE_5 without payment',async()=>{const c=await current();assert.equal(c.planCode,'FREE_5');assert.equal(c.source,'FREE');assert.equal(c.subscription,null);});
  test('exact free quota 5 GB',async()=>assert.equal((await current()).quotaBytes,5e9));
  for(const[code,n]of [['STANDARD_32',32e9],['STANDARD_64',64e9],['STANDARD_128',128e9],['STANDARD_256',256e9],['STANDARD_512',512e9],['STANDARD_1TB',1e12],['STANDARD_2TB',2e12]] as const)test(`${code} exact replacement quota`,async()=>{await paid(code);assert.equal((await current()).quotaBytes,n);});

@@ -8,7 +8,7 @@
     "dev:api": "npm run dev --workspace @backup/api",
     "dev:web": "npm run dev --workspace @backup/web",
     "build": "npm run build --workspace @backup/shared && npm run build --workspace @backup/api && npm run build --workspace @backup/web",
-    "test": "node --test scripts/test/*.test.mjs && npm run test --workspace @backup/shared && npm run test --workspace @backup/api && npm run test --workspace @backup/web",
+    "test": "node --test scripts/test/*.test.mjs infrastructure/railway/owner-payment-test.test.mjs && npm run test --workspace @backup/shared && npm run test --workspace @backup/api && npm run test --workspace @backup/web",
     "test:integration": "npm run test:integration --workspace @backup/api",
     "test:uploads": "npm run test:uploads --workspace @backup/api",
     "test:uploads:live": "node scripts/validate-upload-live.mjs",
