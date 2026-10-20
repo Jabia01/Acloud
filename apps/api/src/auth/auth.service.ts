@@ -52,8 +52,8 @@ export class AuthService {
   }
   private async upsertDevice(client: PoolClient, userId: string, input: DeviceInput) {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,101002))',[input.identifier]);
-    const existing = await client.query('SELECT id,revoked_at FROM devices WHERE user_id=$1 AND device_identifier=$2 FOR UPDATE', [userId, input.identifier]);
-    if (existing.rows[0]?.revoked_at) throw new BadRequestException('Device registration unavailable');
+    const existing = await client.query('SELECT id,revoked_at,platform FROM devices WHERE user_id=$1 AND device_identifier=$2 FOR UPDATE', [userId, input.identifier]);
+    if (existing.rows[0] && (existing.rows[0].revoked_at || existing.rows[0].platform !== input.platform)) throw new BadRequestException('Device registration unavailable');
     if(!existing.rowCount&&Number((await client.query('SELECT count(*) n FROM devices WHERE user_id=$1 AND revoked_at IS NULL',[userId])).rows[0].n)>=(betaConfiguration().enabled?betaConfiguration().maxDevices:limitSetting('MAX_ACCOUNT_DEVICES',20,1000)))throw new BadRequestException('Device limit reached');
     if(!existing.rowCount&&Number((await client.query('SELECT count(DISTINCT user_id) n FROM devices WHERE device_identifier=$1 AND revoked_at IS NULL',[input.identifier])).rows[0].n)>=limitSetting('MAX_DEVICE_ACCOUNTS',5,100))throw new BadRequestException('Device relationship requires review');
     const result = await client.query(`INSERT INTO devices (id,user_id,device_identifier,display_name,platform,app_version,os_version)
@@ -72,12 +72,21 @@ export class AuthService {
       if (!user || user.status !== 'ACTIVE' || user.privacy_state !== 'ACTIVE') throw new UnauthorizedException(INVALID);
       // Reset might have changed the password while expensive verification ran.
       if (user.password_hash !== candidate.password_hash) throw new UnauthorizedException(INVALID);
-      if(Number((await client.query('SELECT count(*) n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[user.id])).rows[0].n)>=limitSetting('MAX_ACTIVE_SESSIONS',10,1000))throw new ConflictException('Session limit reached. Sign out of another browser or device, then try again.');
       let deviceId: string | null = null;
       if (device) {
         try { deviceId = await this.upsertDevice(client, user.id, device); }
         catch (error) { if (error instanceof BadRequestException) throw new UnauthorizedException(INVALID); throw error; }
       }
+      // Password verification and the user lock precede rotation. Only replace this
+      // account's registered browser sessions; never rotate a native device session.
+      if (device?.platform === 'web' && deviceId) {
+        const replaced = await client.query(`UPDATE sessions s SET revoked_at=now() FROM devices d
+          WHERE s.user_id=$1 AND s.device_id=$2 AND d.id=s.device_id AND d.user_id=s.user_id
+          AND d.platform='web' AND d.revoked_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>now()
+          RETURNING s.id`, [user.id,deviceId]);
+        for (const row of replaced.rows) await this.audit(client,user.id,'SESSION_REVOKED',row.id);
+      }
+      if(Number((await client.query('SELECT count(*) n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[user.id])).rows[0].n)>=limitSetting('MAX_ACTIVE_SESSIONS',10,1000))throw new ConflictException('Session limit reached. Sign out of another browser or device, then try again.');
       const session = await client.query("INSERT INTO sessions (id,user_id,token_hash,device_id,expires_at) VALUES ($1,$2,$3,$4,now()+interval '30 days') RETURNING id,expires_at", [randomUUID(), user.id, digest(raw), deviceId]);
       await this.audit(client, user.id, 'LOGIN', session.rows[0].id);
       // This is the one endpoint permitted to return the issued bearer credential.

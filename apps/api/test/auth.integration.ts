@@ -124,6 +124,35 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
       assert.equal((await pool.query('SELECT count(*)::int n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[userId])).rows[0].n,1);
     } finally { if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved; }
   });
+  test('repeat web login rotates only the same browser even at the session cap', async () => {
+    const browser=randomUUID(),other=randomUUID(),native=randomUUID();
+    const web=(identifier=browser,pass=password)=>post('/auth/login',{email:address,password:pass,device:{identifier,displayName:'Browser fixture',platform:'web'}});
+    const first=await web().expect(200),secondBrowser=await web(other).expect(200),ipad=await login(native).expect(200);
+    // Simulate older duplicate browser sessions without exposing bearer tokens.
+    await pool.query("INSERT INTO sessions(id,user_id,token_hash,device_id,expires_at) SELECT $1,user_id,$2,device_id,expires_at FROM sessions WHERE id=$3",[randomUUID(),digest(randomUUID()),first.body.sessionId]);
+    const saved=process.env.MAX_ACTIVE_SESSIONS;process.env.MAX_ACTIVE_SESSIONS='4';
+    try {
+      await web(browser,randomUUID()).expect(401);
+      await get('/me',first.body.sessionToken).expect(200);
+      const replacement=await web().expect(200);
+      await get('/me',first.body.sessionToken).expect(401);
+      await get('/me',replacement.body.sessionToken).expect(200);
+      await get('/me',secondBrowser.body.sessionToken).expect(200);
+      await get('/me',ipad.body.sessionToken).expect(200);
+      assert.equal((await pool.query('SELECT count(*)::int n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[userId])).rows[0].n,3);
+      assert.equal((await pool.query("SELECT count(*)::int n FROM auth_audit_events WHERE user_id=$1 AND event='SESSION_REVOKED'",[userId])).rows[0].n,2);
+      const concurrent=await Promise.all([web(),web()]);assert.deepEqual(concurrent.map(r=>r.status),[200,200]);
+      assert.equal((await pool.query('SELECT count(*)::int n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()',[userId])).rows[0].n,3);
+    } finally {if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved;}
+  });
+  test('claiming web platform cannot rotate an existing iPad session',async()=>{
+    const identifier=randomUUID(),ipad=await login(identifier).expect(200);
+    const saved=process.env.MAX_ACTIVE_SESSIONS;process.env.MAX_ACTIVE_SESSIONS='1';
+    try {
+      await post('/auth/login',{email:address,password,device:{identifier,displayName:'Claimed browser',platform:'web'}}).expect(401);
+      await get('/me',ipad.body.sessionToken).expect(200);
+    }finally{if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved;}
+  });
   test('session issuance stores only its hash; /me is authenticated and returns safe fields', async () => {
     await request(app.getHttpServer()).get('/me').expect(401);
     const response = await login().expect(200); const raw = response.body.sessionToken;
