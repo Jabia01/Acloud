@@ -34,7 +34,7 @@ export class PaystackBillingProvider extends BillingProvider {
  private subscription(d:any):ProviderSubscription{return{code:d.subscription_code,customerCode:typeof d.customer==='object'?d.customer.customer_code:'',planCode:typeof d.plan==='object'?d.plan.plan_code:'',status:d.status,nextPaymentDate:d.next_payment_date??null,invoiceReferences:(d.invoices??[]).map((i:any)=>i.transaction?.reference).filter((r:unknown)=>typeof r==='string').slice(0,100)};}
  async fetchSubscription(code:string){return this.subscription(await this.request(`/subscription/${encodeURIComponent(code)}`));}
  async createSubscription(customer:string,p:Price,start:Date,authorization?:string){
-  const c=await this.request(`/customer/${encodeURIComponent(customer)}`);const candidates=(c.subscriptions??[]).filter((s:any)=>s.plan?.plan_code===p.provider_plan_code&&['active','non-renewing'].includes(s.status));
+  const c=await this.request(`/customer/${encodeURIComponent(customer)}`);const candidates=(c.subscriptions??[]).filter((s:any)=>s.plan?.plan_code===p.provider_plan_code&&s.status==='active');
   // Never repeat an ambiguous provider create. A canonical match must be unique and scheduled correctly.
   if(candidates.length){if(candidates.length!==1)throw new ServiceUnavailableException('Subscription reconciliation required');const s=await this.fetchSubscription(candidates[0].subscription_code);if(!s.nextPaymentDate||Math.abs(Date.parse(s.nextPaymentDate)-start.getTime())>60000)throw new ServiceUnavailableException('Subscription reconciliation required');return s;}
   if(!authorization)throw new ServiceUnavailableException('Reusable payment authorization required');

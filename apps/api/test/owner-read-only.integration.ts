@@ -7,7 +7,7 @@ describe('isolated owner read-only staff HTTP and PostgreSQL',{concurrency:false
  let fixture:NodeJS.ProcessEnv;
  before(async()=>{
   assert.ok(['localhost','127.0.0.1'].includes(new URL(database).hostname));root=new Pool({connectionString:database});await root.query('CREATE SCHEMA '+schema);const url=new URL(database);url.searchParams.set('options','-c search_path='+schema);process.env.DATABASE_URL=url.href;process.env.NODE_ENV='test';process.env.APP_ENV='test';process.env.BETA_ENABLED='false';process.env.INTERNAL_ADMIN_ENABLED='true';process.env.ADMIN_MFA_REQUIRED='true';process.env.MFA_ENCRYPTION_KEY='11'.repeat(32);
-  const{migrate}=await import('../../../scripts/migrate.mjs');assert.equal(await migrate(),17);pool=new Pool({connectionString:url.href});
+  const{migrate}=await import('../../../scripts/migrate.mjs');assert.equal(await migrate(),18);pool=new Pool({connectionString:url.href});
   const storage={identity:()=>({provider:'minio',binding:null,environment:'test'}),assertBinding:()=>{},isHealthy:async()=>true};
   const m=await Test.createTestingModule({imports:[AppModule]}).overrideProvider(ObjectStorageProvider).useValue(storage).overrideGuard(AdminRateLimit).useValue({canActivate:()=>true}).compile();app=m.createNestApplication();app.useGlobalFilters(new SafeErrors());await app.init();await app.listen(0,'127.0.0.1');admin=app.get(AdminService);
   const hash=await app.get(PasswordService).hash(password);

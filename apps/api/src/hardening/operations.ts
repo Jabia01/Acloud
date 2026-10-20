@@ -15,6 +15,7 @@ export class PrivacyController{
  @Post('export') @HttpCode(202) @UseGuards(SessionGuard)export(@Req()r:AuthRequest,@Body()b:unknown){return this.privacy.export(r.principal,b);}
  @Post('exports/:id/chunks/:sequence/authorize') @HttpCode(200) @UseGuards(SessionGuard)authorizeChunk(@Req()r:AuthRequest,@Param('id')id:string,@Param('sequence')sequence:string){return this.exports.authorize(r.principal,id,Number(sequence));}
  @Post('exports/:id/chunks/:sequence/download') @HttpCode(200) @UseGuards(SessionGuard)downloadChunk(@Req()r:AuthRequest,@Param('id')id:string,@Param('sequence')sequence:string,@Body()b:{capability:string}){return this.exports.chunk(r.principal,id,Number(sequence),b?.capability);}
+ @Get('exports') @UseGuards(SessionGuard)history(@Req()r:AuthRequest){return this.privacy.exportHistory(r.principal);}
  @Get('exports/:id') @UseGuards(SessionGuard)result(@Req()r:AuthRequest,@Param('id')id:string){return this.privacy.exportResult(r.principal,id);}
 }
 @Controller('internal/operations') @UseGuards(AdminGuard) @UseInterceptors(AuthNoStore)

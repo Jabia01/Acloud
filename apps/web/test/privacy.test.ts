@@ -8,3 +8,8 @@ for(const change of [{APP_ENV:'development'},{WEB_ORIGIN:'http://localhost:3000'
 
 test('ACL015 export capabilities use owner routes without locator queries',()=>{const id=randomUUID();assert.ok(privacyRoute('POST',['exports',id,'chunks','0','authorize']));assert.ok(privacyRoute('POST',['exports',id,'chunks','9999','download']));for(const sequence of ['-1','10000','00','../0'])assert.equal(privacyRoute('POST',['exports',id,'chunks',sequence,'authorize']),null);assert.equal(privacyRoute('GET',['exports',id,'chunks','0','download']),null);});
 test('ACL015 lifecycle staff routes cannot accept provider objects or arbitrary paths',()=>{const id=randomUUID();assert.ok(adminRoute('GET',['lifecycle','metrics'],''));assert.ok(adminRoute('GET',['lifecycle','accounts',id],''));assert.ok(adminRoute('POST',['lifecycle','accounts',id,'holds'],''));assert.equal(adminRoute('POST',['lifecycle','objects','delete'],''),null);assert.equal(adminRoute('GET',['lifecycle','accounts',id],'?objectKey=private'),null);});
+
+test('export history is allowlisted and projects only status metadata',()=>{
+ assert.equal(privacyRoute('GET',['exports']),'/privacy/exports');assert.equal(privacyRoute('POST',['exports']),null);
+ const result=publicPrivacyResult('exports',{items:[{exportId:randomUUID(),state:'READY',createdAt:'generated',expiresAt:'generated',encrypted_payload:'PRIVATE'}]});assert.ok(result);assert.ok(!JSON.stringify(result).includes('PRIVATE'));
+});

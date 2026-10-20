@@ -18,6 +18,8 @@ export class BillingController{
  @Get('history')@UseGuards(SessionGuard)history(@Req()r:AuthRequest,@Query()q:Record<string,unknown>){return this.service.history(r.principal,q);}
  @Post('checkout')@HttpCode(200)@UseGuards(SessionGuard,BillingRateLimit)checkout(@Req()r:AuthRequest,@Body()b:unknown,@Headers('idempotency-key')key:string){return this.service.checkout(r.principal,b,key);}
  @Post('cancel')@HttpCode(200)@UseGuards(SessionGuard,BillingRateLimit)cancel(@Req()r:AuthRequest,@Body()b:unknown,@Headers('idempotency-key')key:string){return this.service.cancel(r.principal,b,key);}
+ @Post('plan-change')@HttpCode(200)@UseGuards(SessionGuard,BillingRateLimit)change(@Req()r:AuthRequest,@Body()b:unknown,@Headers('idempotency-key')key:string){return this.service.changePlan(r.principal,b,key);}
+ @Post('plan-change/undo')@HttpCode(200)@UseGuards(SessionGuard,BillingRateLimit)undo(@Req()r:AuthRequest,@Body()b:unknown,@Headers('idempotency-key')key:string){return this.service.changePlan(r.principal,b,key,true);}
  @Post('webhooks/paystack')@HttpCode(200)webhook(@Req()r:RawBodyRequest<Request>,@Headers('x-paystack-signature')sig:string){return this.service.webhook(r.rawBody!,sig??'');}
 }
 @Controller('internal/billing')@UseGuards(AdminGuard,AdminRateLimit)
