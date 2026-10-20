@@ -34,3 +34,14 @@ for(const bad of ['../private','objects/*','https://evil.invalid','objects/abcd1
 test('deletion inventory fails on nonadvancing provider cursor',async()=>{class Inventory extends Contract{protected async send(c:S3Client,command:any){if(command.constructor.name==='ListObjectVersionsCommand')return{IsTruncated:true,NextKeyMarker:key,NextVersionIdMarker:'same'};return super.send(c,command);}}await assert.rejects(new Inventory(config).versionsForDeletion(key));});
 
 test('development MinIO signs local network hostname but rejects remote HTTP',()=>{const config={NODE_ENV:'development',S3_ENDPOINT:'http://127.0.0.1:9000',S3_PUBLIC_ENDPOINT:'http://mac.local:9000',S3_BUCKET:'fixture-bucket',S3_ACCESS_KEY_ID:randomUUID(),S3_SECRET_ACCESS_KEY:randomUUID()};assert.equal(storageConfig(config).publicEndpoint,'http://mac.local:9000');assert.throws(()=>storageConfig({...config,S3_PUBLIC_ENDPOINT:'http://mac.local.attacker.invalid:9000'}));assert.throws(()=>storageConfig({...config,NODE_ENV:'production'}));});
+
+test('configured storage connections are reused, retry budgets isolated, and shutdown closes them',()=>{
+ class Connections extends BackblazeB2StorageProvider {connection(publicEndpoint=false,attempts=3){return this.client(publicEndpoint,attempts);}release(c:S3Client){this.releaseClient(c);}}
+ const p=new Connections(config),one=p.connection(),signing=p.connection(true),nonretry=p.connection(false,1);let destroyed=0;
+ one.destroy=()=>{destroyed++;};assert.equal(p.connection(),one);assert.notEqual(one,signing);assert.notEqual(one,nonretry);
+ p.release(one);assert.equal(destroyed,0);p.onModuleDestroy();assert.equal(destroyed,1);assert.notEqual(p.connection(),one);p.onModuleDestroy();
+});
+test('connection reuse never skips the private-bucket guard',async()=>{
+ const p=provider();await p.getObjectMetadata(key);p.publicBucket=true;await assert.rejects(p.getObjectMetadata(key));
+ assert.equal(p.calls.filter(c=>c.constructor.name==='GetBucketAclCommand').length,2);p.onModuleDestroy();
+});

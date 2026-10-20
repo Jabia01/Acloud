@@ -16,7 +16,7 @@ public struct RestoreFiles:Sendable {
   let root=directory.resolvingSymlinksInPath().standardizedFileURL
   guard parent.pathComponents==root.pathComponents else{throw RestoreFailure.storage}
  }
- public func remove(_ id:UUID)throws{let file=url(id);try validate(file);if FileManager.default.fileExists(atPath:file.path){try FileManager.default.removeItem(at:file)}}
+ public func remove(_ id:UUID,includingPartial:Bool=true)throws{let file=url(id);try validate(file);if FileManager.default.fileExists(atPath:file.path){try FileManager.default.removeItem(at:file)};if includingPartial{try RestorePartial(target:file).remove()}}
  public func verify(_ item:RestoreItem)throws{let file=url(item.id);try validate(file);guard try file.resourceValues(forKeys:[.isRegularFileKey]).isRegularFile==true else{throw RestoreFailure.integrity};let handle=try FileHandle(forReadingFrom:file);defer{try? handle.close()};var sha=SHA256(),size=0;while let bytes=try autoreleasepool(invoking:{try handle.read(upToCount:65536)}),!bytes.isEmpty{try Task.checkCancellation();size+=bytes.count;guard size<=item.evidence.expectedSize else{throw RestoreFailure.integrity};sha.update(data:bytes)};guard size == item.evidence.expectedSize,sha.finalize().map({String(format:"%02x",$0)}).joined() == item.evidence.expectedSha256 else{throw RestoreFailure.integrity}}
 }
 

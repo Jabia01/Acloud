@@ -34,11 +34,13 @@ private actor TestTransport:PartTransport {
  var backgroundIDs:Set<UUID>=[];var cancelledIDs:Set<UUID>=[]
  func background(_ id:UUID){backgroundIDs.insert(id)}
  func activeItemIDs()async->Set<UUID>{backgroundIDs}
- let api:TestAPI;var numbers:[Int]=[];var failNumber:Int?;var loseResponse=false;var failAuthorization=false;var failuresRemaining=1
+ let api:TestAPI;var numbers:[Int]=[];var delayMillis=0,inFlight=0,maximumInFlight=0;var failNumber:Int?;var loseResponse=false;var failAuthorization=false;var failuresRemaining=1
  init(api:TestAPI,background:Bool=false){self.api=api;keepsTransfersDuringConnectionLoss=background}
+ func slow(_ milliseconds:Int){delayMillis=milliseconds}
  func configure(fail:Int?,lose:Bool=false,expired:Bool=false,times:Int=1){failNumber=fail;loseResponse=lose;failAuthorization=expired;failuresRemaining=times}
  func upload(item:UUID,number:Int,resource:PreparedResource,authorization:UploadAuthorization,policy:BackupPolicy) async throws {
-  numbers.append(number)
+  numbers.append(number);inFlight+=1;maximumInFlight=max(maximumInFlight,inFlight);defer{inFlight-=1}
+  if delayMillis>0{try await Task.sleep(for:.milliseconds(delayMillis))}
   if failNumber==number {failuresRemaining-=1;if failuresRemaining==0{failNumber=nil};if loseResponse{await api.accept(number,size:resource.sizeBytes)};throw failAuthorization ? BackupFailure.authorization : URLError(.networkConnectionLost)}
   await api.accept(number,size:resource.sizeBytes)
  }
@@ -66,7 +68,7 @@ private struct WaitingPreparer:ResourcePreparer {
 final class BackupEngineTests:XCTestCase {
  fileprivate static func remote(_ id:UUID,status:String,size:Int) throws -> ServerAsset{try asset(id,status:status,size:size)}
  private func directory() throws -> URL {let d=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString);try FileManager.default.createDirectory(at:d,withIntermediateDirectories:true);addTeardownBlock{try? FileManager.default.removeItem(at:d)};return d}
- private func fixture(bytes:Int=12*1024*1024,onProtected:@escaping @Sendable() async->Void={}) async throws -> (SQLiteBackupQueue,BackupCoordinator,TestAPI,TestTransport,BackupItem,ManagedTemporaryFiles,URL) {
+ private func fixture(bytes:Int=12*1024*1024,partConcurrency:Int=1,onProtected:@escaping @Sendable() async->Void={}) async throws -> (SQLiteBackupQueue,BackupCoordinator,TestAPI,TestTransport,BackupItem,ManagedTemporaryFiles,URL) {
   let d=try directory(),source=d.appendingPathComponent("source");try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
   let local=UUID(),url=source.appendingPathComponent(local.uuidString+".bin")
   FileManager.default.createFile(atPath:url.path,contents:nil);let h=try FileHandle(forWritingTo:url)
@@ -74,8 +76,45 @@ final class BackupEngineTests:XCTestCase {
   let files=try ManagedTemporaryFiles(directory:d.appendingPathComponent("temp")),queue=try SQLiteBackupQueue(url:d.appendingPathComponent("queue.sqlite"))
   let api=TestAPI(),transport=TestTransport(api:api),item=BackupItem(libraryID:UUID(),localAssetIdentifier:local.uuidString,mediaType:"test")
   _=try await queue.enqueue(item)
-  let engine=BackupCoordinator(queue:queue,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:source,files:files),files:files,onProtected:onProtected)
+  let engine=BackupCoordinator(queue:queue,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:source,files:files),files:files,partConcurrency:partConcurrency,onProtected:onProtected)
   try await engine.setNetwork(NetworkSnapshot());return(queue,engine,api,transport,item,files,d)
+ }
+ func testParallelMultipartIsBoundedAndReconcilesBeforeProtection()async throws {
+  let(q,e,api,t,item,_,_)=try await fixture(partConcurrency:2)
+  await t.slow(40);try await e.run(item.id)
+  let maximum=await t.maximumInFlight,numbers=await t.numbers,parts=try await q.parts(item.id),state=try await q.read(item.id)?.state,complete=await api.completed
+  XCTAssertEqual(maximum,2);XCTAssertEqual(numbers.sorted(),[1,2,3]);XCTAssertEqual(parts.count,3);XCTAssertEqual(state,.protected);XCTAssertTrue(complete)
+ }
+ func testParallelMultipartFailureRetainsAcceptedPartsForRetry()async throws {
+  let(q,e,_,t,item,_,_)=try await fixture(partConcurrency:2)
+  await t.slow(20);await t.configure(fail:2)
+  do{try await e.run(item.id);XCTFail()}catch{}
+  let failed=try await q.read(item.id)?.state;XCTAssertEqual(failed,.failedRetryable)
+  try await e.retryFailed(item.id);try await e.run(item.id)
+  let numbers=await t.numbers,state=try await q.read(item.id)?.state
+  XCTAssertEqual(numbers.filter{$0==1}.count,1);XCTAssertEqual(numbers.filter{$0==2}.count,2);XCTAssertEqual(state,.protected)
+ }
+ private actor PreparationSlots:ResourcePreparer {
+  var started=0,maximum=0,active=0,released=false
+  var waiters:[CheckedContinuation<Void,Never>]=[]
+  func prepare(_ item:BackupItem,policy:BackupPolicy,network:NetworkSnapshot)async throws->PreparedResource{
+   started+=1;active+=1;maximum=max(maximum,active);defer{active-=1}
+   if !released{await withCheckedContinuation{waiters.append($0)}}
+   throw BackupFailure.waitingForOriginal
+  }
+  func release(){released=true;let pending=waiters;waiters=[];for waiter in pending{waiter.resume()}}
+  func cleanup(_ item:BackupItem)async throws{}
+ }
+ func testDueQueueUsesTwoSlotsAndRejectsOverlappingWorkers()async throws {
+  let(q,_,api,t,item,files,_)=try await fixture(bytes:100),preparer=PreparationSlots()
+  for _ in 0..<2{_=try await q.enqueue(BackupItem(libraryID:item.libraryID,localAssetIdentifier:UUID().uuidString,mediaType:"test"))}
+  let e=BackupCoordinator(queue:q,api:api,transport:t,preparer:preparer,files:files)
+  try await e.setNetwork(NetworkSnapshot());let worker=Task{try await e.runDue()}
+  for _ in 0..<200{if await preparer.started==2{break};try await Task.sleep(for:.milliseconds(5))}
+  try await e.runDue();let initial=await preparer.started
+  await preparer.release();try await worker.value
+  let maximum=await preparer.maximum,total=await preparer.started
+  XCTAssertEqual(initial,2);XCTAssertEqual(maximum,2);XCTAssertEqual(total,3)
  }
  private actor ProtectionEvents {var count=0;func add(){count+=1}}
  func testBackgroundAlertHookWaitsForServerVerificationAndFiresBeforeWorkerReturns()async throws{

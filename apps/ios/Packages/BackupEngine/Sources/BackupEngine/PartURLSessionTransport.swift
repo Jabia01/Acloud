@@ -10,7 +10,14 @@ public final class PartURLSessionTransport:NSObject,PartTransport,URLSessionTask
  }
  private let lock=NSLock();private var pending:[Int:CheckedContinuation<Void,Error>]=[:]
  private var finishHandler:(@Sendable()->Void)?
- private lazy var session:URLSession={
+ private let sessionLock=NSLock()
+ private var storedSession:URLSession?
+ private var session:URLSession {
+  sessionLock.lock();defer{sessionLock.unlock()}
+  if let storedSession{return storedSession}
+  let created=makeSession();storedSession=created;return created
+ }
+ private func makeSession()->URLSession {
   let c:URLSessionConfiguration
   #if os(iOS)
   c=background ? .background(withIdentifier:identifier) : .ephemeral
@@ -21,8 +28,9 @@ public final class PartURLSessionTransport:NSObject,PartTransport,URLSessionTask
   c.waitsForConnectivity=background
   c.httpCookieStorage=nil;c.urlCredentialStorage=nil;c.urlCache=nil;c.allowsCellularAccess=cellular
   c.allowsConstrainedNetworkAccess=false;c.allowsExpensiveNetworkAccess=cellular;c.timeoutIntervalForResource=300
+  c.httpMaximumConnectionsPerHost=4
   return URLSession(configuration:c,delegate:self,delegateQueue:nil)
- }()
+ }
  public init(origin:URL,background:Bool=false,sessionIdentifier:String="com.example.backupclient.dev.multipart",allowsCellular:Bool=false,allowLocalHTTP:Bool=false) throws {
   guard origin.user==nil,origin.password==nil,origin.query==nil,origin.fragment==nil,origin.scheme=="https" || (allowLocalHTTP && origin.scheme=="http" && (["localhost","127.0.0.1"].contains(origin.host ?? "") || origin.host?.hasSuffix(".local") == true)) else{throw BackupFailure.authorization}
   self.origin=origin;self.background=background;cellular=allowsCellular;identifier=sessionIdentifier;super.init()

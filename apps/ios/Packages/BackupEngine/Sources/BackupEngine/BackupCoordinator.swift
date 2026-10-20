@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import UploadFoundation
 
 public actor BackupCoordinator {
@@ -9,11 +10,15 @@ public actor BackupCoordinator {
  private let files:ManagedTemporaryFiles
  private let onProtected:@Sendable() async->Void
  private let retry:RetryPolicy
+ private let performance=Logger(subsystem:"com.acloud.transfers",category:"backup-performance")
+ private let fileConcurrency:Int,partConcurrency:Int
+ private var runningDue=false
  private var policy:BackupPolicy
  private var network=NetworkSnapshot(connected:false)
  private var active:[UUID:Task<Void,Error>]=[:]
  private var failureStages:[UUID:String]=[:]
- public init(queue:SQLiteBackupQueue,api:any MultipartAPI,transport:any PartTransport,preparer:any ResourcePreparer,files:ManagedTemporaryFiles,policy:BackupPolicy=BackupPolicy(),retry:RetryPolicy=RetryPolicy(),onProtected:@escaping @Sendable() async->Void={}) {
+ public init(queue:SQLiteBackupQueue,api:any MultipartAPI,transport:any PartTransport,preparer:any ResourcePreparer,files:ManagedTemporaryFiles,policy:BackupPolicy=BackupPolicy(),retry:RetryPolicy=RetryPolicy(),fileConcurrency:Int=2,partConcurrency:Int=2,onProtected:@escaping @Sendable() async->Void={}) {
+  self.fileConcurrency=max(1,min(2,fileConcurrency));self.partConcurrency=max(1,min(2,partConcurrency))
   self.queue=queue;self.api=api;self.transport=transport;self.preparer=preparer;self.files=files;self.policy=policy;self.retry=retry;self.onProtected=onProtected
  }
  public func setNetwork(_ value:NetworkSnapshot) async throws {
@@ -83,7 +88,9 @@ public actor BackupCoordinator {
    guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");return}
    _=try await transition(id,.preparing)
    failureStages[id]="Preparing original"
+   let preparationStarted=Date()
    let resource=try await preparer.prepare(item,policy:policy,network:network)
+   performance.info("phase=prepare durationMs=\(Int(Date().timeIntervalSince(preparationStarted)*1000)) bytes=\(resource.sizeBytes)")
    item=try await current(id)
    if let checksum=item.expectedChecksum,checksum != resource.checksum{throw BackupFailure.sourceChanged}
    if let size=item.expectedSizeBytes,size != resource.sizeBytes{throw BackupFailure.sourceChanged}
@@ -103,18 +110,19 @@ public actor BackupCoordinator {
     let count=(resource.sizeBytes+size-1)/size;guard count<=10000 else{throw BackupFailure.unsupported}
     try await queue.replaceParts(id,parts:listing.parts)
     _=try await transition(id,.uploading)
-    for number in 1...count {
-     item=try await current(id);guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");return}
-     if listing.parts.contains(where:{$0.partNumber==number}){continue}
-     failureStages[id]="Preparing upload part"
-     let part=try files.part(resource,id:id,number:number,size:size)
-     do {
-      // Authorization is always fresh and exists only in memory / system transfer daemon.
-      listing=try await uploadPart(id,sessionID:session.id,number:number,part:part)
-      try await queue.replaceParts(id,parts:listing.parts)
-      item=try await current(id);item.bytesUploaded=listing.parts.reduce(0){$0+$1.sizeBytes};item=try await queue.save(item)
-      try files.remove(part.fileURL)
-     } catch {try? files.remove(part.fileURL);throw error}
+    let missing=(1...count).filter{number in !listing.parts.contains(where:{$0.partNumber==number})}
+    // Reconcile once per bounded batch. Never persist competing, stale listings
+    // from parallel requests, or prepare an unbounded number of temporary parts.
+    for start in stride(from:0,to:missing.count,by:partConcurrency) {
+     let batch=Array(missing[start..<min(start+partConcurrency,missing.count)])
+     try await withThrowingTaskGroup(of:Void.self){group in
+      for number in batch{group.addTask{try await self.transferPart(id,sessionID:session.id,resource:resource,number:number,size:size)}}
+      try await group.waitForAll()
+     }
+     failureStages[id]="Checking received parts"
+     listing=try await api.parts(session.id)
+     try await queue.replaceParts(id,parts:listing.parts)
+     item=try await current(id);item.bytesUploaded=listing.parts.reduce(0){$0+$1.sizeBytes};item=try await queue.save(item)
     }
     failureStages[id]="Completing uploaded parts"
     _=try await api.complete(session.id)
@@ -141,9 +149,17 @@ public actor BackupCoordinator {
    _=try await queue.save(latest);try await preparer.cleanup(latest);throw error
   }
  }
+ private func transferPart(_ id:UUID,sessionID:UUID,resource:PreparedResource,number:Int,size:Int)async throws {
+  let item=try await current(id)
+  guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");throw CancellationError()}
+  failureStages[id]="Preparing upload part"
+  let part=try files.part(resource,id:id,number:number,size:size)
+  defer{try? files.remove(part.fileURL)}
+  try await uploadPart(id,sessionID:sessionID,number:number,part:part)
+ }
  // A background callback is a limited execution opportunity. Recover a dropped
  // connection here instead of relying solely on a foreground retry timer.
- private func uploadPart(_ id:UUID,sessionID:UUID,number:Int,part:PreparedResource)async throws->PartListing {
+ private func uploadPart(_ id:UUID,sessionID:UUID,number:Int,part:PreparedResource)async throws {
   var recoveries=0
   while true {
    let item=try await current(id)
@@ -153,10 +169,12 @@ public actor BackupCoordinator {
     let auth=try await api.authorize(sessionID,number:number,size:part.sizeBytes,checksum:part.checksum)
     _=try await current(id)
     failureStages[id]="Transferring file bytes"
+    let uploadStarted=Date()
     try await transport.upload(item:id,number:number,resource:part,authorization:auth,policy:policy)
+    performance.info("phase=upload-part durationMs=\(Int(Date().timeIntervalSince(uploadStarted)*1000)) bytes=\(part.sizeBytes)")
     _=try await current(id)
     failureStages[id]="Checking received parts"
-    return try await api.parts(sessionID)
+    return
    } catch {
     guard transport.keepsTransfersDuringConnectionLoss,
           let failure=error as? URLError,failure.code == .networkConnectionLost,
@@ -168,13 +186,15 @@ public actor BackupCoordinator {
     failureStages[id]="Reconciling interrupted transfer"
     let listing=try await api.parts(sessionID)
     _=try await current(id)
-    if listing.completed || listing.parts.contains(where:{$0.partNumber==number}){return listing}
+    if listing.completed || listing.parts.contains(where:{$0.partNumber==number}){return}
     // Missing parts receive a new short-lived authorization on the next pass.
    }
   }
  }
  private func verify(_ id:UUID,sessionID:UUID) async throws {
   failureStages[id]="Verifying saved backup"
+  let verificationStarted=Date()
+  defer{performance.info("phase=verify durationMs=\(Int(Date().timeIntervalSince(verificationStarted)*1000))")}
   let result=try await api.verify(sessionID)
   if try await proof(id){return}
   if result.status == .failed {
@@ -273,8 +293,15 @@ public actor BackupCoordinator {
   }
  }
  public func runDue() async throws {
+  guard !runningDue else{return};runningDue=true;defer{runningDue=false}
   // Recovery waits until the cancelled worker/daemon transfer has drained.
   try await resumeNetworkPauses()
-  for item in try await queue.due(){do{try await run(item.id)}catch{/* Durable sanitized error already recorded; no media logging. */}}
+  let items=try await queue.due()
+  await withTaskGroup(of:Void.self){group in
+   var index=0
+   func next(){guard index<items.count else{return};let id=items[index].id;index+=1;group.addTask{do{try await self.run(id)}catch{/* Durable sanitized error already recorded. */}}}
+   for _ in 0..<fileConcurrency{next()}
+   while await group.next() != nil{if !Task.isCancelled{next()}}
+  }
  }
 }
