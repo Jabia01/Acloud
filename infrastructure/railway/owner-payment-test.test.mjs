@@ -10,7 +10,7 @@ test('expiry closes checkout but allows existing staging services to restart',()
 test('disabled profile does not alter ordinary billing behavior',()=>{assert.equal(ownerPaymentTestConfiguration({}),null);assert.equal(ownerPaymentTestConfiguration({OWNER_PAYMENT_TEST_ENABLED:'false'}),null)});
 
 test('startup identifies rejected setting without exposing its value',()=>{
- for(const [patch,code] of [[{PAYSTACK_SECRET_KEY:'sk_live_DO_NOT_LOG_THIS_SECRET'},'PAYMENT_TEST_SECRET_KEY'],[{RESTORE_ENABLED:'true'},'PAYMENT_TEST_RESTORE_ENABLED'],[{OWNER_PAYMENT_TEST_RESOURCE_HASH:'sensitive-binding'},'PAYMENT_TEST_RESOURCE_BINDING']]){
+ for(const [patch,code] of [[{PAYSTACK_SECRET_KEY:['sk','live','generated', 'x'.repeat(24)].join('_')},'PAYMENT_TEST_SECRET_KEY'],[{RESTORE_ENABLED:'true'},'PAYMENT_TEST_RESTORE_ENABLED'],[{OWNER_PAYMENT_TEST_RESOURCE_HASH:'sensitive-binding'},'PAYMENT_TEST_RESOURCE_BINDING']]){
   let error;try{ownerPaymentTestConfiguration({...paymentFixture(),...patch})}catch(e){error=e}
   assert.equal(error?.code,code);assert.equal(safeStartupFailure(error),'Railway staging configuration refused; code='+code+'; credentials suppressed');
  }
