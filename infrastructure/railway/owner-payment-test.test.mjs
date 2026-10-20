@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {ownerPaymentTestConfiguration} from './owner-payment-test.cjs';import {check} from './start.mjs';
+import {ownerPaymentTestConfiguration} from './owner-payment-test.cjs';import {check,safeStartupFailure} from './start.mjs';
 export function paymentFixture(now=Date.now()){
  const closed=['BETA_ENABLED','BETA_ALLOW_REAL_MEDIA','BETA_ALLOW_PAYMENTS','BETA_ALLOW_B2','BETA_ALLOW_FREE_UP_SPACE','BETA_ALLOW_SUPPORT_TOOLS','CUSTOMER_REGISTRATION_ENABLED','ENABLE_FREE_UP_SPACE','ACCOUNT_DELETION_ENABLED','ACCOUNT_DELETION_EXECUTION_ENABLED','RETENTION_EXECUTION_ENABLED','RESTORE_ENABLED'];
  return{...Object.fromEntries(closed.map(k=>[k,'false'])),NODE_ENV:'production',APP_ENV:'staging',STORAGE_ENVIRONMENT:'staging',STORAGE_PROVIDER:'backblaze_b2',OWNER_DEVICE_TEST_ENABLED:'true',BILLING_ENABLED:'true',PAYSTACK_ENVIRONMENT:'TEST',PAYSTACK_SECRET_KEY:'sk_test_generated123456',OWNER_PAYMENT_TEST_ENABLED:'true',OWNER_PAYMENT_TEST_ACCOUNT_ID:'11111111-1111-4111-8111-111111111111',OWNER_DEVICE_TEST_ACCOUNT_ID:'11111111-1111-4111-8111-111111111111',OWNER_PAYMENT_TEST_RESOURCE_HASH:'a'.repeat(64),OWNER_DEVICE_TEST_RESOURCE_HASH:'a'.repeat(64),OWNER_PAYMENT_TEST_STARTS_AT:new Date(now-60000).toISOString(),OWNER_PAYMENT_TEST_EXPIRES_AT:new Date(now+3600000).toISOString(),OWNER_DEVICE_TEST_STARTS_AT:new Date(now-86400000).toISOString(),OWNER_DEVICE_TEST_EXPIRES_AT:new Date(now+86400000).toISOString(),B2_BUCKET_NAME:'generated-staging',BETA_EXPECTED_BUCKET:'generated-staging',DATABASE_URL:'postgresql://runtime@db.fixture.supabase.co/postgres?sslmode=verify-full',BETA_DATABASE_NAME:'postgres',PORT:'8080'};
@@ -8,3 +8,12 @@ test('private TEST billing coexists with closed customer exposure and infrastruc
 for(const [name,patch]of Object.entries({liveKey:{PAYSTACK_SECRET_KEY:'sk_live_generated123456'},liveMode:{PAYSTACK_ENVIRONMENT:'LIVE'},production:{APP_ENV:'production'},openBeta:{BETA_ENABLED:'true'},differentOwner:{OWNER_PAYMENT_TEST_ACCOUNT_ID:'22222222-2222-4222-8222-222222222222'},wrongResource:{OWNER_PAYMENT_TEST_RESOURCE_HASH:'b'.repeat(64)},missingOwner:{OWNER_DEVICE_TEST_ENABLED:'false'},registration:{CUSTOMER_REGISTRATION_ENABLED:'true'},invalidFlag:{OWNER_PAYMENT_TEST_ENABLED:'yes'},noKey:{PAYSTACK_SECRET_KEY:''},unbounded:{OWNER_PAYMENT_TEST_EXPIRES_AT:new Date(Date.now()+7*86400000).toISOString()}}))test('test profile refuses '+name,()=>assert.throws(()=>ownerPaymentTestConfiguration({...paymentFixture(),...patch})));
 test('expiry closes checkout but allows existing staging services to restart',()=>{const now=Date.now(),f=paymentFixture(now-2*3600000);assert.equal(ownerPaymentTestConfiguration(f,now).active,false);assert.equal(check(f,'api'),true)});
 test('disabled profile does not alter ordinary billing behavior',()=>{assert.equal(ownerPaymentTestConfiguration({}),null);assert.equal(ownerPaymentTestConfiguration({OWNER_PAYMENT_TEST_ENABLED:'false'}),null)});
+
+test('startup identifies rejected setting without exposing its value',()=>{
+ for(const [patch,code] of [[{PAYSTACK_SECRET_KEY:'sk_live_DO_NOT_LOG_THIS_SECRET'},'PAYMENT_TEST_SECRET_KEY'],[{RESTORE_ENABLED:'true'},'PAYMENT_TEST_RESTORE_ENABLED'],[{OWNER_PAYMENT_TEST_RESOURCE_HASH:'sensitive-binding'},'PAYMENT_TEST_RESOURCE_BINDING']]){
+  let error;try{ownerPaymentTestConfiguration({...paymentFixture(),...patch})}catch(e){error=e}
+  assert.equal(error?.code,code);assert.equal(safeStartupFailure(error),'Railway staging configuration refused; code='+code+'; credentials suppressed');
+ }
+ assert.equal(safeStartupFailure(new Error('secret connection credentials')),'Railway staging configuration refused; credentials suppressed');
+ assert.equal(safeStartupFailure({code:'secret value'}),'Railway staging configuration refused; credentials suppressed');
+});
