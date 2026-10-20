@@ -314,7 +314,9 @@ struct AcloudPreviewPreparer:ResourcePreparer {
            let account=verified.accountID,let asset=verified.assetID,let checksum=verified.expectedChecksum,let size=verified.expectedSizeBytes,
            size>0,size<=BackupPreviewPolicy.maximumLocalBytes,["image","video"].contains(verified.mediaType) {
             if let data=try? await AcloudPreviewStore.shared.capture(file:files.url(item.id),account:account,asset:asset,checksum:checksum,size:size,mediaType:verified.mediaType) {
+                try? await ThumbnailOutbox.shared.enqueue(account:account,asset:asset,checksum:checksum,data:data)
                 await AcloudPreviewRegistry.shared.received(account:account,asset:asset,checksum:checksum,data:data)
+                await AcloudThumbnailPublisher.start(account:account,queue:queue)
             }
         }
         try await wrapped.cleanup(item)
@@ -377,7 +379,7 @@ enum AcloudPreviewFailureMessage {
     private var generation=UUID()
     func invalidate(){generation=UUID();data=nil;loading=false;message=nil;previewBytes=0;previewSize=0;previewStage="";thumbnailRetryAt=nil;if let activeDownload{Task{await activeDownload.cancel()}};activeDownload=nil}
     func cancelPreview(){invalidate();message="Preview loading cancelled. Your saved backup is unchanged."}
-    private func connection(account:UUID,wifiOnly:Bool=false)async throws->HTTPRestoreAPI {
+    func connection(account:UUID,wifiOnly:Bool=false)async throws->HTTPRestoreAPI {
         guard BetaReleaseSafety.acceptedConfiguration,let value=Bundle.main.object(forInfoDictionaryKey:"APIBaseURL") as? String,let base=URL(string:value) else{throw RestoreFailure.authorization}
         let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session")
         guard UUID(uuidString:try await AuthAPI(baseURL:base,store:tokens).me().id)==account else{throw RestoreFailure.authorization}
@@ -439,7 +441,8 @@ enum AcloudPreviewFailureMessage {
             step="creating the thumbnail";previewStage="Creating preview"
             let preview=try await AcloudPreviewStore.shared.capture(file:files.url(id),account:account,asset:asset,checksum:proof.expectedSha256,size:proof.expectedSize,mediaType:proof.mediaType)
             try Task.checkCancellation();guard epoch==generation else{return};data=preview;message=nil
-            try? await api.saveThumbnail(proof,data:preview)
+            try? await ThumbnailOutbox.shared.enqueue(account:account,asset:asset,checksum:proof.expectedSha256,data:preview)
+            AcloudThumbnailPublisher.start(account:account)
         } catch is CancellationError {return}
         catch {
             guard epoch==generation else{return}
@@ -478,16 +481,19 @@ struct AcloudPreviewImage:View {
 @MainActor final class AcloudPreviewRegistry:ObservableObject {
     static let shared=AcloudPreviewRegistry()
     private var loaders:[String:AcloudPreviewLoader]=[:]
+    private var used:[String:UInt64]=[:]
+    private var sequence:UInt64=0
     func loader(account:UUID,asset:UUID,checksum:String?)->AcloudPreviewLoader {
         let key=account.uuidString+asset.uuidString+(checksum ?? "")
+        sequence &+= 1;used[key]=sequence
         if let loader=loaders[key]{return loader}
-        if loaders.count>=256,let oldest=loaders.keys.sorted().first {loaders.removeValue(forKey:oldest)?.invalidate()}
+        if loaders.count>=256,let oldest=loaders.keys.min(by:{(used[$0] ?? 0)<(used[$1] ?? 0)}) {loaders.removeValue(forKey:oldest);used.removeValue(forKey:oldest)}
         let loader=AcloudPreviewLoader();loaders[key]=loader;return loader
     }
     func received(account:UUID,asset:UUID,checksum:String,data:Data) {
         loaders[account.uuidString+asset.uuidString+checksum]?.data=data
     }
-    func clear(){AcloudThumbnailPublisher.clear();for loader in loaders.values{loader.invalidate()};loaders=[:]}
+    func clear(){AcloudThumbnailPublisher.clear();for loader in loaders.values{loader.invalidate()};loaders=[:];used=[:]}
 }
 private struct AcloudSavedPreviewControl:View {
     let account:UUID,asset:UUID
@@ -541,37 +547,156 @@ func acloudCapacity<T:BinaryInteger>(_ bytes:T)->String {
 }
 
 // Derived-preview sync is opportunistic and never owns or advances backup work.
+@MainActor final class AcloudThumbnailSyncStatus:ObservableObject {
+ static let shared=AcloudThumbnailSyncStatus()
+ @Published var pending=0
+ @Published var failed=0
+ @Published var waitingForAccess=0
+ @Published var waitingForBudget=0
+}
 @MainActor enum AcloudThumbnailPublisher {
     private static var worker:Task<Void,Never>?
     private static var epoch=UUID()
-    private static var stored=Set<String>()
-    private static var attempted:[String:Date]=[:]
-    static func clear(){epoch=UUID();worker?.cancel();worker=nil;stored=[];attempted=[:]}
-    static func sync(account:UUID,entries:[(UUID,String)]) {
-        guard worker==nil,!entries.isEmpty else{return};let generation=epoch
+    private static var owner:UUID?
+    private static var pendingQueue:SQLiteBackupQueue?
+    private static var migrated=false
+    static func clear(){epoch=UUID();worker?.cancel();worker=nil;owner=nil;pendingQueue=nil;migrated=false;AcloudThumbnailSyncStatus.shared.pending=0;AcloudThumbnailSyncStatus.shared.failed=0;AcloudThumbnailSyncStatus.shared.waitingForAccess=0;AcloudThumbnailSyncStatus.shared.waitingForBudget=0}
+    static func start(account:UUID,queue:SQLiteBackupQueue?=nil) {
+        if owner != account{clear();owner=account}
+        if let queue{pendingQueue=queue}
+        guard worker==nil else{return};let generation=epoch
         worker=Task {
             defer{if generation==epoch{worker=nil}}
-            guard BetaReleaseSafety.acceptedConfiguration,let value=Bundle.main.object(forInfoDictionaryKey:"APIBaseURL") as? String,let base=URL(string:value) else{return}
-            let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session")
-            guard let user=try? await AuthAPI(baseURL:base,store:tokens).me(),UUID(uuidString:user.id)==account,
-                  let api=try? HTTPRestoreAPI(base:base,tokens:tokens,allowLocalHTTP:_isDebugAssertConfiguration(),wifiOnly:true) else{return}
-            var count=0
-            for (asset,checksum) in entries {
-                guard !Task.isCancelled,generation==epoch else{return}
-                let key=account.uuidString+asset.uuidString+checksum
-                guard !stored.contains(key),attempted[key].map({Date().timeIntervalSince($0)>60}) ?? true else{continue}
-                guard let bytes=try? await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:checksum),bytes.count<=40*1024 else{continue}
-                attempted[key]=Date();count+=1
-                do {
-                    let bytes=try PreviewJPEG.withoutMetadata(bytes)
-                    let proof=try await api.thumbnailEvidence(asset)
-                    guard proof.id==asset,proof.expectedSha256==checksum,generation==epoch,!Task.isCancelled else{continue}
-                    try await api.saveThumbnail(proof,data:bytes)
-                    guard generation==epoch else{return};stored.insert(key)
-                    if stored.count>512{stored=[key]};if attempted.count>512{attempted=[key:Date()]}
-                }catch{} // Optional derivative failure cannot fail a protected original.
-                if count>=4{return}
+            while !Task.isCancelled,generation==epoch {
+                if !migrated,let queue=pendingQueue {
+                    await migrateCached(account:account,queue:queue,generation:generation)
+                    if generation==epoch{migrated=true}
+                }
+                await drain(account:account,generation:generation)
+                if generation==epoch,let summary=try? await ThumbnailOutbox.shared.summary(account:account){AcloudThumbnailSyncStatus.shared.pending=summary.pending;AcloudThumbnailSyncStatus.shared.failed=summary.failed;AcloudThumbnailSyncStatus.shared.waitingForAccess=summary.waitingForAccess;AcloudThumbnailSyncStatus.shared.waitingForBudget=summary.waitingForBudget}
+                do{try await Task.sleep(for:.seconds(15))}catch{return}
             }
         }
+    }
+    // Legacy cached derivatives need no original download. Scan every page once per session.
+    private static func migrateCached(account:UUID,queue:SQLiteBackupQueue,generation:UUID)async {
+        var cursor:UUID?
+        while generation==epoch,!Task.isCancelled {
+            guard let page=try? await queue.previewItems(account:account,after:cursor),!page.isEmpty else{return}
+            for item in page {
+                guard generation==epoch,!Task.isCancelled else{return}
+                if let asset=item.assetID,let checksum=item.expectedChecksum,
+                   let bytes=try? await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:checksum),
+                   let clean=try? PreviewJPEG.withoutMetadata(bytes){try? await ThumbnailOutbox.shared.enqueue(account:account,asset:asset,checksum:checksum,data:clean)}
+            }
+            cursor=page.last?.id;if page.count<100{return}
+        }
+    }
+    private static func drain(account:UUID,generation:UUID)async {
+        guard BetaReleaseSafety.acceptedConfiguration,let value=Bundle.main.object(forInfoDictionaryKey:"APIBaseURL") as? String,let base=URL(string:value),
+              let jobs=try? await ThumbnailOutbox.shared.due(account:account),!jobs.isEmpty else{return}
+        let tokens=KeychainSessionStore(service:(Bundle.main.bundleIdentifier ?? "com.example.backupclient")+".session")
+        guard let user=try? await AuthAPI(baseURL:base,store:tokens).me(),UUID(uuidString:user.id)==account,
+              let api=try? HTTPRestoreAPI(base:base,tokens:tokens,allowLocalHTTP:_isDebugAssertConfiguration(),wifiOnly:true) else{return}
+        for job in jobs {
+            guard generation==epoch,!Task.isCancelled else{return}
+            do {
+                let proof=try await api.thumbnailEvidence(job.asset)
+                guard proof.id==job.asset,proof.expectedSha256==job.sourceChecksum else{try? await ThumbnailOutbox.shared.deferJob(job,reason:.integrity);continue}
+                guard generation==epoch,!Task.isCancelled else{return}
+                try await api.saveThumbnail(proof,data:job.data)
+                guard generation==epoch,!Task.isCancelled else{return}
+                try await ThumbnailOutbox.shared.acknowledge(job)
+            }catch is CancellationError{return}
+            catch {
+                var reason:ThumbnailRetryReason = .network
+                if let failure=error as? RestoreFailure {
+                    switch failure {
+                    case .authorization,.http(401),.http(403):reason = .access
+                    case .http(404),.http(409):reason = .preservation
+                    case .http(429):reason = .budget
+                    case .unsupported,.http(400),.http(413),.http(415):reason = .unsupported
+                    case .integrity,.versionChanged:reason = .integrity
+                    default:break
+                    }
+                }
+                try? await ThumbnailOutbox.shared.deferJob(job,reason:reason)
+            }
+        }
+    }
+}
+
+// Explicit, bounded recovery for historical backups without a cached/cloud derivative.
+@MainActor final class AcloudThumbnailRebuildModel:ObservableObject {
+    struct Candidate {let asset:UUID,checksum:String,size:Int}
+    @Published var busy=false
+    @Published var message=""
+    @Published var confirm=false
+    private(set) var candidates:[Candidate]=[]
+    private var task:Task<Void,Never>?
+    private var loader:AcloudPreviewLoader?
+    private var epoch=UUID()
+    var count:Int{candidates.count}
+    var bytes:Int{candidates.reduce(0){$0+$1.size}}
+    func cancel(){epoch=UUID();task?.cancel();task=nil;loader?.cancelPreview();loader=nil;busy=false;confirm=false;candidates=[]}
+    func plan(account:UUID){
+        cancel();busy=true;message="Checking saved-preview metadata…";let generation=epoch
+        task=Task {
+            defer{if generation==epoch{busy=false;task=nil}}
+            do {
+                let api=try await AcloudPreviewLoader().connection(account:account,wifiOnly:true)
+                var cursor:String?,scanned=0,selected:[Candidate]=[],total=0,cached=0
+                repeat {
+                    let page=try await api.inventory(cursor:cursor)
+                    for item in page.items {
+                        try Task.checkCancellation();guard generation==epoch else{return};scanned+=1
+                        guard item.thumbnailKey==nil,["image","video"].contains(item.mediaType),let size=item.sizeBytes,size>0,size<=BackupPreviewPolicy.maximumDownloadBytes else{continue}
+                        // Evidence is metadata only; no original is downloaded until confirmation.
+                        guard let proof=try? await api.thumbnailEvidence(item.id),proof.id==item.id,proof.expectedSize==size else{continue}
+                        if let bytes=try? await AcloudPreviewStore.shared.cached(account:account,asset:item.id,checksum:proof.expectedSha256),let clean=try? PreviewJPEG.withoutMetadata(bytes){
+                            try await ThumbnailOutbox.shared.enqueue(account:account,asset:item.id,checksum:proof.expectedSha256,data:clean);cached+=1;continue
+                        }
+                        if selected.count<20,total+size<=128*1024*1024{selected.append(Candidate(asset:item.id,checksum:proof.expectedSha256,size:size));total+=size}
+                    }
+                    cursor=page.nextCursor
+                }while cursor != nil && scanned<200 && selected.count<20
+                guard generation==epoch else{return};AcloudThumbnailPublisher.start(account:account)
+                candidates=selected
+                if selected.isEmpty{message=cached>0 ? "Queued \(cached) cached previews for sync without downloading originals.":"No eligible missing previews in this batch. Incomplete, unsupported or larger files may need individual review."}
+                else{message="\(selected.count) saved previews can be rebuilt. Cached previews are synced separately.";confirm=true}
+            }catch is CancellationError{}
+            catch{if generation==epoch{message="Could not check saved previews. Confirm your account access and an unrestricted Wi-Fi connection."}}
+        }
+    }
+    func rebuild(account:UUID){
+        guard !busy,!candidates.isEmpty else{return};let batch=candidates,generation=epoch;confirm=false;busy=true
+        task=Task {
+            defer{if generation==epoch{busy=false;task=nil;loader=nil;candidates=[]}}
+            var completed=0,failed=0
+            for (index,item) in batch.enumerated(){
+                guard generation==epoch,!Task.isCancelled else{return}
+                message="Rebuilding saved preview \(index+1) of \(batch.count)…"
+                let active=AcloudPreviewLoader();loader=active
+                await active.load(account:account,asset:item.asset,checksum:item.checksum,download:true)
+                guard generation==epoch,!Task.isCancelled else{return}
+                if active.data != nil{completed+=1}else{failed+=1}
+            }
+            message="Rebuilt \(completed) saved previews"+(failed>0 ? "; \(failed) could not be rebuilt.":".")+" Originals are unchanged."
+        }
+    }
+}
+struct AcloudThumbnailMaintenance:View {
+    let account:UUID
+    @StateObject private var model=AcloudThumbnailRebuildModel()
+    var body:some View {
+        VStack(alignment:.leading,spacing:6){
+            if model.busy{ProgressView(model.message);Button("Cancel preview recovery"){model.cancel()}}
+            else{Button("Recover missing saved previews…"){model.plan(account:account)};if !model.message.isEmpty{Text(model.message).font(.caption).foregroundStyle(.secondary)}}
+        }
+        .confirmationDialog("Rebuild \(model.count) saved previews?",isPresented:$model.confirm,titleVisibility:.visible){
+            Button("Download saved copies over Wi-Fi"){model.rebuild(account:account)}
+            Button("Cancel",role:.cancel){model.cancel()}
+        }message:{Text("This downloads up to \(acloudCapacity(model.bytes)) of the exact saved originals to rebuild small previews. Up to 20 items per batch. Temporary downloads are removed afterward. Nothing is added to Photos.")}
+        .onDisappear{model.cancel()}
     }
 }

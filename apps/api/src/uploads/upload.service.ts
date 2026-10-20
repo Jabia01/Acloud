@@ -1,3 +1,4 @@
+import {savedThumbnailKey} from '../restore/saved-version';
 import {ownerTestConfigured,ownerTestAsset,ownerTestBound,ownerTestTTL} from '../beta/owner-test';
 import {BetaPolicy} from '../beta/policy';import {betaConfiguration} from '../beta/config';
 import {limitSetting} from '../hardening/config';
@@ -281,18 +282,24 @@ export class UploadService {
     }
     return this.db.transaction(async c => {
       await this.lock(c,p);
-      if (anchor && !(await c.query("SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND status='PROTECTED' AND ($3::text IS NULL OR media_type=$3)",[anchor,p.userId,media])).rowCount) throw new BadRequestException('Invalid cursor');
+      if (anchor && !(await c.query("SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND status='PROTECTED' AND privacy_deleted_at IS NULL AND ($3::text IS NULL OR media_type=$3)",[anchor,p.userId,media])).rowCount) throw new BadRequestException('Invalid cursor');
       // Compare timestamps inside PostgreSQL, retaining microsecond precision.
       const whereMedia = media === null ? '' : ' AND a.media_type=$4';
       const values: unknown[] = [p.userId,anchor,limit+1];
       if (media !== null) values.push(media);
-      const result = await c.query(`SELECT a.id,a.media_type,a.status,a.verified_size_bytes,a.protected_at,d.id AS device_id,d.display_name
-        FROM assets a LEFT JOIN devices d ON d.id=a.device_id AND d.user_id=a.user_id
-        WHERE a.user_id=$1 AND a.status='PROTECTED'${whereMedia}
+      const result = await c.query(`SELECT a.id,a.media_type,a.status,a.verified_size_bytes,a.protected_at,d.id AS device_id,d.display_name,t.thumbnail_sha256,t.cloud_version_id AS thumbnail_cloud_version,a.storage_provider,a.storage_binding,a.storage_object_key,a.storage_version_id
+        FROM assets a LEFT JOIN saved_thumbnails t ON t.asset_id=a.id AND t.user_id=a.user_id AND t.source_sha256=a.expected_checksum LEFT JOIN devices d ON d.id=a.device_id AND d.user_id=a.user_id
+        WHERE a.user_id=$1 AND a.status='PROTECTED' AND a.privacy_deleted_at IS NULL${whereMedia}
+        AND (NOT EXISTS(SELECT 1 FROM media_manifest_resources all_r WHERE all_r.asset_id=a.id AND all_r.user_id=a.user_id)
+         OR EXISTS(SELECT 1 FROM media_manifest_resources display_r WHERE display_r.asset_id=a.id AND display_r.user_id=a.user_id
+          AND display_r.role IN ('PRIMARY_STILL','PRIMARY_VIDEO','EDITED_RENDER')
+          AND NOT EXISTS(SELECT 1 FROM media_manifest_resources preferred WHERE preferred.manifest_id=display_r.manifest_id AND preferred.user_id=a.user_id
+           AND preferred.role IN ('PRIMARY_STILL','PRIMARY_VIDEO','EDITED_RENDER')
+           AND ((CASE WHEN preferred.role='EDITED_RENDER' THEN 0 ELSE 1 END,preferred.ordinal,preferred.id)<(CASE WHEN display_r.role='EDITED_RENDER' THEN 0 ELSE 1 END,display_r.ordinal,display_r.id)))))
         AND ($2::uuid IS NULL OR (a.protected_at,a.id)<(SELECT protected_at,id FROM assets WHERE id=$2 AND user_id=$1))
         ORDER BY a.protected_at DESC,a.id DESC LIMIT $3`,values);
       const rows = result.rows.slice(0,limit);
-      return {items:rows.map(r => ({...safeAsset(r),protectedAt:r.protected_at,captureDate:null,durationSeconds:null,device:r.device_id ? {id:r.device_id,displayName:r.display_name} : null})),
+      return {items:rows.map(r => ({...safeAsset(r),thumbnailKey:savedThumbnailKey(r),protectedAt:r.protected_at,captureDate:null,durationSeconds:null,device:r.device_id ? {id:r.device_id,displayName:r.display_name} : null})),
         nextCursor:result.rows.length>limit ? Buffer.from(JSON.stringify({v:1,id:rows.at(-1)!.id,media})).toString('base64url') : null};
     });
   }
@@ -323,7 +330,7 @@ export class UploadService {
   async asset(p: Principal,id: string) {
     return this.db.transaction(async c => {
       await this.lock(c,p);
-      const r=(await c.query('SELECT a.*,d.display_name FROM assets a LEFT JOIN devices d ON d.id=a.device_id AND d.user_id=a.user_id WHERE a.id=$1 AND a.user_id=$2',[id,p.userId])).rows[0];
+      const r=(await c.query('SELECT a.*,d.display_name FROM assets a LEFT JOIN devices d ON d.id=a.device_id AND d.user_id=a.user_id WHERE a.id=$1 AND a.user_id=$2 AND a.privacy_deleted_at IS NULL',[id,p.userId])).rows[0];
       if (!r) { void this.db.query("INSERT INTO operational_security_events(id,code) VALUES($1,'UPLOAD_TARGET_UNAVAILABLE')",[randomUUID()]).catch(()=>{}); throw new NotFoundException('Asset unavailable'); }
       return {...safeAsset(r),protectedAt:r.protected_at,createdAt:r.created_at,captureDate:null,durationSeconds:null,device:r.device_id ? {id:r.device_id,displayName:r.display_name} : null};
     });
@@ -334,7 +341,7 @@ export class UploadService {
     return this.db.transaction(async c => {
       await this.lock(c,p);
       if(ownerTestBound(p))await ownerTestAsset(c,p,id,['downloads']);
-      const r=(await c.query('SELECT * FROM assets WHERE id=$1 AND user_id=$2',[id,p.userId])).rows[0];
+      const r=(await c.query('SELECT * FROM assets WHERE id=$1 AND user_id=$2 AND privacy_deleted_at IS NULL',[id,p.userId])).rows[0];
       if (!r) { void this.db.query("INSERT INTO operational_security_events(id,code) VALUES($1,'UPLOAD_TARGET_UNAVAILABLE')",[randomUUID()]).catch(()=>{}); throw new NotFoundException('Asset unavailable'); }
       if (r.status!=='PROTECTED') throw new ConflictException('Asset is not protected');
       this.storage.assertBinding(r.storage_provider,r.storage_binding);

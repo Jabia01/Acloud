@@ -1,3 +1,4 @@
+import {savedThumbnailKey} from '../src/restore/saved-version';
 import 'reflect-metadata';
 import {test} from 'node:test';import assert from 'node:assert/strict';import {randomUUID,createHash} from 'node:crypto';
 import {thumbnailInput,jpegDimensions,thumbnailAccountBudget} from '../src/restore/thumbnail-policy';
@@ -16,6 +17,7 @@ test('private thumbnails retain owner/device/version/preservation checks, immuta
  let active=true,rows:any[]=[],resources:any[]=[],usage={bytes:0,recent:0};
  const c={query:async(sql:string,args:any[]=[])=>{
   if(sql.includes('FROM sessions'))return{rows:active?[{id:session}]:[],rowCount:active?1:0};
+  if(sql.startsWith('SELECT id FROM assets'))return{rows:args[0]===id&&args[1]===user&&args[2]===device?[{id}]:[]};
   if(sql.includes('FROM assets a'))return{rows:args[0]===id&&args[1]===user?[asset]:[]};
   if(sql.includes('FROM asset_verifications'))return{rows:[{id:randomUUID()}]};
   if(sql.includes('media_manifest_summary'))return{rows:resources};
@@ -38,6 +40,12 @@ test('private thumbnails retain owner/device/version/preservation checks, immuta
   const result=await api.thumbnail(p,id);assert.equal(result.dataBase64,body.dataBase64);assert.equal(result.thumbnailSha256,createHash('sha256').update(bytes).digest('hex'));
   await api.saveThumbnail(p,id,{...body,dataBase64:jpeg(100,100).toString('base64')});assert.equal(rows.length,1);assert.equal((await api.thumbnail(p,id)).dataBase64,body.dataBase64);
   resources=[{kind:'LIVE_PHOTO',protection_state:'PARTIAL',role:'PRIMARY_STILL',expected_size:100,expected_sha256:source}];await assert.rejects(api.thumbnail(p,id));resources=[];
-  process.env.DEVELOPMENT_RESTORE_TEST_ASSET_ID=randomUUID();process.env.RESTORE_ENABLED='false';await assert.rejects(api.thumbnail(p,id));
+  process.env.DEVELOPMENT_RESTORE_TEST_ASSET_ID=randomUUID();process.env.RESTORE_ENABLED='false';assert.equal((await api.thumbnail(p,id)).assetId,id);process.env.THUMBNAILS_ENABLED='false';await assert.rejects(api.thumbnail(p,id));
  }finally{for(const key of Object.keys(process.env))if(!(key in saved))delete process.env[key];Object.assign(process.env,saved);}
+});
+
+test('gallery cache key is invalidated by any saved storage version change',()=>{
+ const asset={storage_provider:'minio',storage_binding:'generated',storage_object_key:'generated-object',storage_version_id:'version-one'};
+ const valid={...asset,thumbnail_cloud_version:protectedVersion(asset),thumbnail_sha256:'a'.repeat(64)};
+ assert.ok(savedThumbnailKey(valid));assert.equal(savedThumbnailKey({...valid,storage_version_id:'version-two'}),null);assert.equal(savedThumbnailKey({...valid,thumbnail_sha256:'invalid'}),null);
 });

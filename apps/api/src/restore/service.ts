@@ -1,3 +1,5 @@
+import {protectedVersion} from './saved-version';
+import {thumbnailAccess} from './thumbnail-access';
 import {thumbnailInput,thumbnailAccountBudget} from './thumbnail-policy';
 import {requirePreviewResource} from './preview-policy';
 import {ownerTestConfigured,ownerTestAsset,ownerTestRestoreIds,ownerTestTTL} from '../beta/owner-test';
@@ -8,7 +10,8 @@ export function developmentRestoreAsset(env:NodeJS.ProcessEnv=process.env){
  const id=env.DEVELOPMENT_RESTORE_TEST_ASSET_ID;
  return env.NODE_ENV==='development' && env.STORAGE_PROVIDER!=='backblaze_b2' && env.BETA_ENABLED!=='true' && id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : undefined;
 }
-export function protectedVersion(r:Record<string,unknown>){return createHash('sha256').update(JSON.stringify([r.storage_provider,r.storage_binding,r.storage_object_key,r.storage_version_id])).digest('hex');}
+export {protectedVersion} from './saved-version';
+
 @Injectable()export class RestoreService {
  constructor(@Inject(DatabaseService)private db:DatabaseService,@Inject(ObjectStorageProvider)private storage:ObjectStorageProvider,@Inject(BetaPolicy)private beta:BetaPolicy){}
  private async lock(c:PoolClient,p:Principal){await c.query("SELECT id FROM users WHERE id=$1 AND status='ACTIVE' AND privacy_state='ACTIVE' FOR UPDATE",[p.userId]);const r=await c.query("SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN devices d ON d.id=s.device_id WHERE s.id=$1 AND s.user_id=$2 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.status='ACTIVE' AND u.privacy_state='ACTIVE' AND (s.device_id IS NULL OR (d.id IS NOT NULL AND d.user_id=s.user_id AND d.revoked_at IS NULL))",[p.sessionId,p.userId]);if(!r.rowCount)throw new UnauthorizedException();}
@@ -21,8 +24,8 @@ export function protectedVersion(r:Record<string,unknown>){return createHash('sh
  async evidence(p:Principal,id:string,manifestId?:string){if(!p.deviceId)throw new ForbiddenException('Device session required');return this.db.transaction(async c=>{await this.lock(c,p);await this.gate(c,p,id);await this.manifestPolicy(c,p,id,manifestId);return this.projection(await this.asset(c,p,id));});}
  async authorize(p:Principal,id:string,value:unknown,manifestId?:string){if(!p.deviceId)throw new ForbiddenException('Device session required');const version=this.input(value);return this.db.transaction(async c=>{await this.lock(c,p);await this.gate(c,p,id);await this.manifestPolicy(c,p,id,manifestId);const r=await this.asset(c,p,id);if(protectedVersion(r)!==version)throw new ConflictException('Protected version changed');const metadata=await this.storage.getObjectMetadata(r.storage_object_key,r.storage_version_id);if(!metadata||metadata.sizeBytes!==Number(r.verified_size_bytes)||metadata.versionId!==r.storage_version_id)throw new ConflictException('Protected object unavailable');const authorization=await this.storage.createDownloadAuthorization(r.storage_object_key,r.storage_version_id,ownerTestTTL(downloadTTL()));return{evidence:this.projection(r),authorization};});}
  async recheck(p:Principal,id:string,value:unknown){const version=this.input(value);const evidence=await this.evidence(p,id);if(evidence.cloudVersionId!==version)throw new ConflictException('Protected version changed');return evidence;}
- private async previewAsset(c:PoolClient,p:Principal,id:string,maximumBytes?:number){
-  await this.lock(c,p);await this.gate(c,p,id);const r=await this.asset(c,p,id);
+ private async previewAsset(c:PoolClient,p:Principal,id:string,maximumBytes?:number,thumbnailWrite?:boolean){
+  await this.lock(c,p);if(thumbnailWrite===undefined)await this.gate(c,p,id);else await thumbnailAccess(c,p,id,thumbnailWrite,this.beta);const r=await this.asset(c,p,id);
   const resources=(await c.query("SELECT m.kind,m.protection_state,m.source_changed,m.integrity_degraded,m.review_required,r.role,r.expected_size,r.expected_sha256 FROM media_manifest_resources r JOIN media_manifest_summary m ON m.id=r.manifest_id WHERE r.asset_id=$1 AND r.user_id=$2 AND m.user_id=$2",[id,p.userId])).rows;
   requirePreviewResource(r,resources,maximumBytes);return r;
  }
@@ -39,17 +42,17 @@ export function protectedVersion(r:Record<string,unknown>){return createHash('sh
  }
  async previewRecheck(p:Principal,id:string,value:unknown){const version=this.input(value),proof=await this.previewEvidence(p,id);if(proof.cloudVersionId!==version)throw new ConflictException('Protected version changed');return proof;}
  private thumbnailProjection(r:any){return{assetId:r.asset_id,cloudVersionId:r.cloud_version_id,sourceSha256:r.source_sha256,thumbnailSha256:r.thumbnail_sha256,mimeType:'image/jpeg',width:r.width,height:r.height,dataBase64:r.jpeg.toString('base64')};}
- async thumbnailEvidence(p:Principal,id:string){if(!p.deviceId)throw new ForbiddenException('Device session required');return this.db.transaction(async c=>this.previewProjection(await this.previewAsset(c,p,id,10*1024*1024*1024)));}
+ async thumbnailEvidence(p:Principal,id:string){if(!p.deviceId)throw new ForbiddenException('Device session required');return this.db.transaction(async c=>this.previewProjection(await this.previewAsset(c,p,id,10*1024*1024*1024,false)));}
  async thumbnail(p:Principal,id:string){
   if(!p.deviceId)throw new ForbiddenException('Device session required');
-  return this.db.transaction(async c=>{const asset=await this.previewAsset(c,p,id,10*1024*1024*1024);
+  return this.db.transaction(async c=>{const asset=await this.previewAsset(c,p,id,10*1024*1024*1024,false);
    const row=(await c.query('SELECT * FROM saved_thumbnails WHERE asset_id=$1 AND user_id=$2 AND cloud_version_id=$3 AND source_sha256=$4',[id,p.userId,protectedVersion(asset),asset.expected_checksum])).rows[0];
    if(!row)throw new NotFoundException('Thumbnail unavailable');return this.thumbnailProjection(row);
   });
  }
  async saveThumbnail(p:Principal,id:string,value:unknown){
   if(!p.deviceId)throw new ForbiddenException('Device session required');const input=thumbnailInput(value);
-  return this.db.transaction(async c=>{const asset=await this.previewAsset(c,p,id,10*1024*1024*1024);
+  return this.db.transaction(async c=>{const asset=await this.previewAsset(c,p,id,10*1024*1024*1024,true);
    if(protectedVersion(asset)!==input.version||asset.expected_checksum!==input.source)throw new ConflictException('Saved version changed');
    const existing=(await c.query('SELECT * FROM saved_thumbnails WHERE asset_id=$1 AND user_id=$2',[id,p.userId])).rows[0];
    if(existing){if(existing.cloud_version_id!==input.version||existing.source_sha256!==input.source)throw new ConflictException('Saved version changed');return{stored:true};}

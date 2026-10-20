@@ -201,21 +201,11 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
     summary=counts;items=page;hasOlderTransfers=items.count==100;showingOlderTransfers=transferAnchor != nil
    }
    await reconcileManifests();try connectionGate.validate(generation);await observeTransferAlerts()
-   if let account=previewAccount {
-    let entries=items.compactMap{item -> (UUID,String)? in
-     guard item.state == .protected,["image","video"].contains(item.mediaType),let asset=item.assetID,let checksum=item.expectedChecksum else{return nil}
-     if let binding=item.mediaResourceBinding {
-      guard let manifest=manifests.first(where:{$0.id==binding.manifestID}),[.fullyProtected,.restoreReady].contains(manifest.state),
-       manifest.required.contains(where:{$0.id==item.id && [.still,.video,.edited].contains($0.descriptor.role)}) else{return nil}
-     }
-     return(asset,checksum)
-    }
-    AcloudThumbnailPublisher.sync(account:account,entries:entries)
-   }
+   if let account=previewAccount,let queue{AcloudThumbnailPublisher.start(account:account,queue:queue)}
   }catch is CancellationError {}catch{message="Backup connector unavailable. Device acceptance is pending."}
  }
 
- func verifiedInBackground() async {await reconcileManifests();await observeTransferAlerts()}
+ func verifiedInBackground() async {await reconcileManifests();await observeTransferAlerts();if let account=previewAccount,let queue{AcloudThumbnailPublisher.start(account:account,queue:queue)}}
  // Scan the full durable queue, independently of the visible history page.
  private func observeTransferAlerts() async {
   guard !alertsSuspended,!scanningAlerts,let queue,let accountID,let library else{return}
@@ -459,6 +449,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
 struct BackupQueueView:View {
  @AppStorage("selectedTransferTab") private var selectedAppTab="backup"
  @ObservedObject private var model=BackupQueueModel.shared
+ @ObservedObject private var thumbnailSync=AcloudThumbnailSyncStatus.shared
  private enum PickerSelection:String,Identifiable {case photo,video,originals;var id:String{rawValue}}
  @State private var pickerSelection:PickerSelection?
  @AppStorage("backupBrowserMode") private var browserMode="gallery"
@@ -548,6 +539,11 @@ struct BackupQueueView:View {
      Section("Recently saved from transfers") {
       Button("Browse all saved backups"){selectedAppTab="restore"}.buttonStyle(.borderedProminent)
       AcloudGalleryControls(filter:$galleryFilter,order:$galleryOrder,size:$gallerySize)
+      if let account=model.previewAccount{AcloudThumbnailMaintenance(account:account).id(account)}
+      if thumbnailSync.pending>0{Text("\(thumbnailSync.pending) small previews waiting to sync over Wi-Fi. Your originals remain protected.").font(.caption).foregroundStyle(.secondary)}
+      if thumbnailSync.waitingForAccess>0{Text("Saved-preview sync is waiting for account or staging-test access. Check Account; your protected originals are unchanged.").font(.caption).foregroundStyle(.secondary)}
+      if thumbnailSync.waitingForBudget>0{Text("Saved-preview sync is waiting for the server rate or storage limit. It will retry later.").font(.caption).foregroundStyle(.secondary)}
+      if thumbnailSync.failed>0{Text("\(thumbnailSync.failed) saved previews need attention. Your protected originals are unchanged.").font(.caption).foregroundStyle(.secondary)}
       Text("Tap a thumbnail to view its saved version. This gallery shows completed items from the loaded transfers; open Restore for your protected library.").font(.caption).foregroundStyle(.secondary)
       if savedGallery.isEmpty{ContentUnavailableView("No matching saved items on this page",systemImage:"photo.on.rectangle",description:Text("Try another filter or check Transfers for work in progress."))}
       AcloudGalleryGrid(items:savedGallery,order:galleryOrder,size:gallerySize,onSelect:{_ in},onOpen:{entry in galleryViewer=AcloudGalleryPresentation(items:savedGallery,startID:entry.id)})

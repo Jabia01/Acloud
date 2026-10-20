@@ -2,6 +2,8 @@
 import React,{useEffect,useRef,useState} from 'react';
 import Link from 'next/link';
 import {Asset,bytes,date} from '../lib/control';
+import {useThumbnailCache} from './thumbnail-cache-provider';
+import {ThumbnailLoadError} from '../lib/thumbnail-cache';
 import {MediaPreview} from './media-preview';
 export function libraryGroups(items:Asset[]){
  const groups=new Map<string,Asset[]>();
@@ -9,16 +11,20 @@ export function libraryGroups(items:Asset[]){
  return [...groups];
 }
 function Thumbnail({asset}:{asset:Asset}){
- const ref=useRef<HTMLSpanElement>(null),[source,setSource]=useState(''),[failed,setFailed]=useState(false);
+ const retries=useRef(0);
+ useEffect(()=>{retries.current=0},[asset.id,asset.thumbnailKey]);
+ const cache=useThumbnailCache(),ref=useRef<HTMLSpanElement>(null),[source,setSource]=useState(''),[status,setStatus]=useState(0),[revision,setRevision]=useState(0);
  useEffect(()=>{
-  const controller=new AbortController();let url='',started=false;
+  let url='',started=false,disposed=false;setSource('');setStatus(0);
   const observer=new IntersectionObserver(entries=>{if(!entries.some(e=>e.isIntersecting)||started)return;started=true;observer.disconnect();
-   void(async()=>{try{const r=await fetch(`/api/media-thumbnail/${asset.id}`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}',cache:'no-store',signal:controller.signal});if(r.status===401){window.location.replace('/login');return;}if(!r.ok)throw new Error();const blob=await r.blob();if(controller.signal.aborted)return;url=URL.createObjectURL(blob);setSource(url)}catch{if(!controller.signal.aborted)setFailed(true)}})();
+   void(async()=>{try{if(!cache)throw new ThumbnailLoadError(503);const blob=await cache.load(asset.id+':'+(asset.thumbnailKey||'pending'),asset.id);if(disposed)return;url=URL.createObjectURL(blob);setSource(url)}catch(e){if(!disposed){const code=e instanceof ThumbnailLoadError?e.status:503;if(code===401){window.location.replace('/login');return}setStatus(code)}}})();
   },{rootMargin:'120px'});
   if(ref.current)observer.observe(ref.current);
-  return()=>{controller.abort();observer.disconnect();if(url)URL.revokeObjectURL(url)};
- },[asset.id]);
- return <span ref={ref} className="library-thumbnail">{source?<img src={source} alt="" onError={()=>{setSource('');setFailed(true)}}/>:<span className="library-thumbnail-empty"><span aria-hidden="true">{asset.mediaType==='video'?'▷':'▧'}</span><small>{failed?'Preview unavailable':'Loading thumbnail'}</small></span>}</span>;
+  return()=>{disposed=true;observer.disconnect();if(url)URL.revokeObjectURL(url)};
+ },[asset.id,asset.thumbnailKey,cache,revision]);
+ useEffect(()=>{if(!status||![404,429,502,503,504].includes(status)||retries.current>=2)return;retries.current++;const timer=setTimeout(()=>setRevision(n=>n+1),status===404?61000:16000);return()=>clearTimeout(timer)},[status]);
+ const label=status===404?'Thumbnail not synced yet':status===403?'Preview access restricted':status===409?'Saved preview not ready':status?'Preview temporarily unavailable':'Loading thumbnail';
+ return <span ref={ref} className="library-thumbnail">{source?<img src={source} alt="" onError={()=>{setSource('');setStatus(409)}}/>:<span className="library-thumbnail-empty"><span aria-hidden="true">{asset.mediaType==='video'?'▷':'▧'}</span><small>{label}</small></span>}</span>;
 }
 export function PhotoLibrary({items,selecting=false,selected=[],onSelect,busy=false,size=170,onDownload}:{items:Asset[];selecting?:boolean;selected?:string[];onSelect?:(id:string)=>void;busy?:boolean;size?:number;onDownload?:(id:string)=>void}){
  const[opened,setOpened]=useState<string|null>(null),dialog=useRef<HTMLDialogElement>(null);

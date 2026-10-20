@@ -1,4 +1,4 @@
-export type Asset = {id:string;mediaType:'image'|'video'|'test';status:string;sizeBytes:number|null;protectedAt:string|null;createdAt?:string;captureDate:null;durationSeconds:null;device:{id:string;displayName:string}|null};
+export type Asset = {thumbnailKey?:string|null;id:string;mediaType:'image'|'video'|'test';status:string;sizeBytes:number|null;protectedAt:string|null;createdAt?:string;captureDate:null;durationSeconds:null;device:{id:string;displayName:string}|null};
 export type Inventory = {items:Asset[];nextCursor:string|null};
 export type StorageSummary = {quotaBytes:number;protectedBytes:number;reservedBytes:number;remainingBytes:number;assetCount:number;photoCount:number;videoCount:number};
 export type BackupSummary = {protectedAssetCount:number;lastProtectedAt:string|null;activeUploads:number;reservedUploads:number;failedUploads:number;staleUploads:number;activeDeviceCount:number};
@@ -33,7 +33,7 @@ export class SessionExpired extends Error {}
 export async function controlRequest<T>(path:string, method='GET', transport:typeof fetch=fetch):Promise<T> {
   const response=await transport(path,{method,cache:'no-store',credentials:'same-origin',...(method==='POST' ? {headers:{'Content-Type':'application/json'},body:'{}'} : {})});
   if(response.status===401) throw new SessionExpired();
-  if(!response.ok) throw new Error(response.status===404 ? 'Item unavailable.' : 'Service unavailable. Please try again.');
+  if(!response.ok) throw new Error(response.status===403&&path.endsWith('/download') ? 'This device is not allowed to download this item. During restricted staging testing, use the registered iPad.' : response.status===404 ? 'Item unavailable.' : 'Service unavailable. Please try again.');
   return response.json() as Promise<T>;
 }
 

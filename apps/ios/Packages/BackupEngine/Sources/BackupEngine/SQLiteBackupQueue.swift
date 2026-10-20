@@ -116,6 +116,14 @@ public actor SQLiteBackupQueue {
   sqlite3_bind_int(s,4,Int32(limit));var result:[BackupItem]=[]
   while true{let r=sqlite3_step(s);if r==SQLITE_DONE{break};guard r==SQLITE_ROW else{throw BackupFailure.storage};result.append(try decode(s))};return result
  }
+ // Scan protected preview candidates independently of the visible transfer-history page.
+ public func previewItems(account:UUID,after:UUID?=nil,limit:Int=100)throws->[BackupItem] {
+  let s=try statement("SELECT record FROM queue WHERE state='PROTECTED' AND json_extract(CAST(record AS TEXT),'$.accountID')=? AND (? IS NULL OR id>?) ORDER BY id LIMIT ?");defer{sqlite3_finalize(s)}
+  bind(account.uuidString,s,1);if let after{bind(after.uuidString,s,2);bind(after.uuidString,s,3)}else{sqlite3_bind_null(s,2);sqlite3_bind_null(s,3)}
+  sqlite3_bind_int(s,4,Int32(max(1,min(100,limit))));var result:[BackupItem]=[]
+  while true{let r=sqlite3_step(s);if r==SQLITE_DONE{break};guard r==SQLITE_ROW else{throw BackupFailure.storage};let item=try decode(s);if item.accountID==account{result.append(item)}}
+  return result
+ }
  public func due(now:Date=Date(),limit:Int=32) throws -> [BackupItem] {
   let s=try statement("SELECT record FROM queue WHERE state IN ('QUEUED','FAILED_RETRYABLE','UPLOADED','VERIFYING','PREPARING','UPLOADING') AND (retry_at IS NULL OR retry_at<=?) ORDER BY state,retry_at,id LIMIT ?");defer{sqlite3_finalize(s)}
   sqlite3_bind_double(s,1,now.timeIntervalSince1970);sqlite3_bind_int(s,2,Int32(max(1,min(limit,100))));var records:[BackupItem]=[]
