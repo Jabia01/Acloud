@@ -7,6 +7,7 @@ import RestoreEngine
 
 struct ContentView: View {
     @AppStorage("selectedTransferTab") private var selectedTab = "backup"
+    @AppStorage("showDeveloperTools") private var showDeveloperTools=false
     @State private var status = "Checking..."
 
     var body: some View {
@@ -17,7 +18,7 @@ struct ContentView: View {
             StorageView().tag("storage").tabItem { Label("Storage", systemImage: "externaldrive") }
             AccountView().tag("account").tabItem { Label("Account", systemImage: "person") }
             #if DEBUG
-            VStack(spacing: 16) {
+            if showDeveloperTools {VStack(spacing: 16) {
             Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Acloud")
                 .font(.largeTitle)
             Text("Development Build")
@@ -25,11 +26,12 @@ struct ContentView: View {
                 .accessibilityLabel("API Status: \(status)")
             }
             .padding()
-            .tag("development").tabItem { Label("Development", systemImage: "heart.text.square") }
+            .tag("development").tabItem { Label("Development", systemImage: "heart.text.square") }}
             #endif
         }
         .tint(AcloudStyle.accent)
-        .task { await checkHealth() }
+        .task { if !showDeveloperTools && selectedTab == "development" {selectedTab="backup"}; await checkHealth() }
+        .onChange(of:showDeveloperTools){_,visible in if !visible && selectedTab == "development"{selectedTab="backup"}}
         .task {
             // Queue recovery belongs to the app, independent of the selected tab.
             while !Task.isCancelled {
@@ -329,18 +331,18 @@ enum AcloudPreviewFailureMessage {
         let reason:String
         if let failure=error as? RestoreFailure {
             switch failure {
-            case .http(401),.http(403),.authorization,.disabled:reason="Preview access was refused. Sign in again or check test access."
+            case .http(401),.http(403),.authorization,.disabled:reason="Sign in again to load this preview."
             case .http(409):reason="This saved item is incomplete, has changed, or is not eligible for a thumbnail."
             case .http(let status):reason="The server returned HTTP \(status). Try again later."
             case .unsupported:reason="A thumbnail is unavailable for this file type or size."
             case .integrity,.versionChanged:reason="The saved file could not be verified. No preview was created."
-            case .storage:reason="The app could not validate its temporary preview folder. No preview was created."
+            case .storage:reason="Could not save this preview on your device. Try again."
             default:reason="The saved preview could not be loaded."
             }
         } else if let failure=error as? AccountAPIError {
             switch failure {
             case .unauthorized:reason="Your sign-in has expired. Sign in again."
-            case .invalidConfiguration:reason="The app could not confirm its staging configuration."
+            case .invalidConfiguration:reason="Acloud could not connect securely. Contact support."
             case .requestFailed:reason="The account service could not confirm access. Try again later."
             }
         } else if let failure=error as? BackupFailure {
@@ -361,7 +363,7 @@ enum AcloudPreviewFailureMessage {
             } else if value.domain==NSCocoaErrorDomain {reason="The device could not read or save the temporary preview file (code \(value.code))."}
             else {reason="The saved file could not be processed on this device."}
         }
-        return "Failed while \(step). \(reason)"
+        return reason
     }
 }
 
@@ -408,7 +410,7 @@ enum AcloudPreviewFailureMessage {
                 guard epoch==generation else{return};data=bytes;message=nil;return
             }catch RestoreFailure.http(404){
                 thumbnailRetryAt=Date().addingTimeInterval(60)
-                if !download{message="No small thumbnail is saved yet. You can explicitly load the saved original over Wi-Fi.";return}
+                if !download{message="A preview is not available yet. Download the original over Wi-Fi to view it.";return}
             }
             guard download else{return}
             let api=try await connection(account:account)
@@ -419,7 +421,7 @@ enum AcloudPreviewFailureMessage {
             if let cached=try await AcloudPreviewStore.shared.cached(account:account,asset:asset,checksum:proof.expectedSha256) {try Task.checkCancellation();guard epoch==generation else{return};data=cached;return}
             guard download else{return}
             guard epoch==generation else{return}
-            guard proof.expectedSize<=BackupPreviewPolicy.maximumDownloadBytes else{message="This original is too large for preview loading. New backups capture a thumbnail on this device.";return}
+            guard proof.expectedSize<=BackupPreviewPolicy.maximumDownloadBytes else{message="This file is too large to preview here. You can restore it from Saved.";return}
             guard let value=Bundle.main.object(forInfoDictionaryKey:"StorageOrigin") as? String,let origin=URL(string:value) else{throw RestoreFailure.authorization}
             guard !Self.downloadBusy else{message="Another saved preview is loading. Try again when it finishes.";return}
             Self.downloadBusy=true;defer{Self.downloadBusy=false;activeDownload=nil}
@@ -508,8 +510,8 @@ private struct AcloudPreviewControl:View {
         VStack(alignment:.leading,spacing:4) {
             if loader.data==nil {
                 if loader.loading {AcloudPreviewProgress(loader:loader)}
-                else {Button("Load saved thumbnail over Wi-Fi"){Task{await loader.load(account:account,asset:asset,checksum:checksum,download:true)}}.font(.caption).buttonStyle(.borderless)}
-                Text(loader.message ?? "Small saved thumbnails load automatically over Wi-Fi and are cached on this device. Older backups may need an explicit original download. Nothing is added to Photos.").font(.caption2).foregroundStyle(.secondary)
+                else {Button("Download original to preview"){Task{await loader.load(account:account,asset:asset,checksum:checksum,download:true)}}.font(.caption).buttonStyle(.borderless)}
+                Text(loader.message ?? "Uses Wi-Fi. Nothing is added to Photos.").font(.caption2).foregroundStyle(.secondary)
             }
         }.task {await loader.load(account:account,asset:asset,checksum:checksum)}
     }

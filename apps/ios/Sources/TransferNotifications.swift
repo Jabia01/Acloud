@@ -134,10 +134,10 @@ struct TransferNotificationSettings: View {
                 Task { await alerts.setEnabled(value) }
             })).disabled(alerts.requestingPermission)
             if alerts.enabled && !alerts.denied {
-                Button("Send test notification") { Task { await alerts.sendTest() } }
+                Button("Try a notification") { Task { await alerts.sendTest() } }
             }
             Text(alerts.status).font(.footnote)
-            Text("Alerts appear when Acloud processes a verified backup, a completed restore, or a transfer needing attention. Background activity depends on iOS. Photo names and previews stay private.").font(.footnote).foregroundStyle(.secondary)
+            Text("Get alerts when backups and restores finish or need attention. Background delivery depends on iOS. Photo names and previews stay private.").font(.footnote).foregroundStyle(.secondary)
             if alerts.denied {
                 Button("Open notification settings") {
                     if let url = URL(string: UIApplication.openNotificationSettingsURLString) { UIApplication.shared.open(url) }

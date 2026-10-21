@@ -24,8 +24,8 @@ struct BackupSelectionSummary {
             if !statusCodes.isEmpty {
                 parts.append("Server response: "+statusCodes.sorted().map{"HTTP \($0)"}.joined(separator:", ")+".")
                 if statusCodes.contains(401){parts.append("Sign in again, then retry the selection.")}
-                else if statusCodes.contains(403){parts.append("The request was not permitted. Check test access or contact support.")}
-                else if statusCodes.contains(409){parts.append("Review existing transfers and the test allowance before retrying.")}
+                else if statusCodes.contains(403){parts.append("The request was not permitted. Check your account access or contact support.")}
+                else if statusCodes.contains(409){parts.append("Check existing transfers and available storage, then try again.")}
                 else if statusCodes.contains(400){parts.append("The selection metadata was rejected. Contact support if this continues.")}
                 else if statusCodes.contains(where:{$0>=500}){parts.append("The service could not process the request. Try again later.")}
             }else{parts.append("Try those items again; contact support if the problem continues.")}

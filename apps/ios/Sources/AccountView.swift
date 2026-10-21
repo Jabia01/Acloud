@@ -2,6 +2,7 @@ import SwiftUI
 import HealthClient
 
 struct AccountView: View {
+    @AppStorage("showDeveloperTools") private var showDeveloperTools=false
     private let api: AuthAPI?
     @State private var account: AccountStatus?
     @State private var email = ""
@@ -46,7 +47,15 @@ struct AccountView: View {
             Section("Help") {
                 Link("Contact support", destination: URL(string:"mailto:Support247.acloud@useacloud.com")!)
                 Link("Privacy requests", destination: URL(string:"mailto:Privacy247.acloud@useacloud.com")!)
-                Text("Never send passwords, verification codes or private photos. Staging support contact delivery is still being verified.").font(.footnote)
+                Text("Never share passwords, verification codes or private photos with support.").font(.footnote)
+            }
+            Section("About Acloud") {
+                Text("Beta · Keep another copy of your photos and videos.").font(.footnote).foregroundStyle(.secondary)
+                #if DEBUG
+                DisclosureGroup("Diagnostics") {
+                    Toggle("Show developer tools",isOn:$showDeveloperTools)
+                }
+                #endif
             }
             if !message.isEmpty { Text(message).accessibilityLabel(message) }
         }.acloudCanvas().task { if let api { account = try? await api.me() } }

@@ -61,7 +61,7 @@ public enum CleanupCopy {
    let read=try await library.read(list.map{$0.backedUp.localID});guard epoch==workflowGeneration else{return}
    let filtered=list.map{c->CleanupCandidate in var c=c;c.pending=c.pending || pending.contains(c.backedUp.localID);return c},summary=FreeUpSpaceEligibilityService().scan(filtered,current:read.snapshots,context:context,permission:read.permission)
    candidates=filtered;reasons=summary.reasons;knownBytes=summary.knownBytes;unknownSizes=summary.unknownSizeCount;selected.formIntersection(Set(filtered.filter{reasons[$0.id] == .eligible}.map(\.id)));history=try await store.history(account:context.userID)
-   message=enabled ? "Explicit review required. At most 10 items per confirmed batch.":"Free Up Space is disabled. Physical-iPhone acceptance and complete backup evidence are required."
+   message=enabled ? "Review up to 10 items before confirming.":"Free Up Space isn’t available yet. Your originals remain on this device."
   }catch{if epoch==workflowGeneration{message="Protection or local access could not be confirmed. No deletion was requested."}}
  }
  public func select(_ media:String?){selected=Set(candidates.filter{reasons[$0.id] == .eligible && (media==nil || $0.backedUp.mediaType==media)}.map(\.id))}

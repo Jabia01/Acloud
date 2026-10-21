@@ -34,7 +34,7 @@ private func backupGuidance(_ item:BackupItem)->String? {
  case .failedRetryable: return "The backup has not been verified. Keep your original and retry when your connection is available."
  case .failedPermanent: return "The backup could not finish. Keep your original. You can retry or contact support."
  case .uploaded, .verifying: return "Upload received. Keep your original while Acloud checks the stored file."
- case .protected: return "Acloud verified the stored file. Keep your original during beta testing."
+ case .protected: return nil
  case .cancelled: return "This transfer was cancelled. Your original remains in Photos."
  default: return nil
  }
@@ -66,7 +66,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  @Published var summary:[BackupState:Int]=[:]
  @Published var items:[BackupItem]=[]
  @Published var manifests:[MediaManifest]=[]
- @Published var message="Sign in to open the development queue."
+ @Published var message="Sign in to start backing up."
  @Published var busy=false
  @Published var canSelectOriginals=false
  @Published private(set) var complexBackupTestAvailable=false
@@ -179,14 +179,14 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   try await e.reconcileStartup()
   try connectionGate.validate(generation)
   #if DEBUG
-  message=canSelectOriginals ? "Development test: explicitly choose up to 10 disposable ordinary photos or short videos. Keep the original. Real-device validation remains pending." : (photoTestEnabled ? "Photo test unavailable: could not confirm this signed-in device. Open Account and sign in again, then return here." : "Photo test flag missing in this installed build. Run the updated Debug build from Xcode.")
+  message=canSelectOriginals ? "" : "Backup access is unavailable. Sign in again or contact support."
   if (try? await accountAPI.ownerDeviceTestRestoreAssets()) != nil {
    try connectionGate.validate(generation)
-   message="Private staging test for this account and device. Keep each item under 32 MB and keep your originals."
+   message="Up to 32 MB per file."
   }
   #else
   try connectionGate.validate(generation)
-  message="Choose photos or videos to back up. Keep your originals during beta testing. Support for Live Photos, RAW and edits is still being validated."
+  message="Choose photos or videos to back up."
   #endif
  }
  func refresh() async {
@@ -202,7 +202,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    }
    await reconcileManifests();try connectionGate.validate(generation);await observeTransferAlerts()
    if let account=previewAccount,let queue{AcloudThumbnailPublisher.start(account:account,queue:queue)}
-  }catch is CancellationError {}catch{message="Backup connector unavailable. Device acceptance is pending."}
+  }catch is CancellationError {}catch{message="Could not load backups. Check your connection and try again."}
  }
 
  func verifiedInBackground() async {await reconcileManifests();await observeTransferAlerts();if let account=previewAccount,let queue{AcloudThumbnailPublisher.start(account:account,queue:queue)}}
@@ -241,7 +241,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  func loadLatestTransfers()async{transferAnchor=nil;await refresh()}
  func enqueueGenerated() async {
   #if !DEBUG
-  message="Generated upload adapters are unavailable in beta Release. Real PhotoKit backup acceptance is pending."
+  message="This backup option is unavailable. Choose photos or videos instead."
   return
   #else
   await action {
@@ -413,7 +413,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   }
  }
  func tick() async {
-  do{try await connect();startWorker(requestAnotherPass:false);await refresh()}catch{message="Waiting for account or API access."}
+  do{try await connect();startWorker(requestAnotherPass:false);await refresh()}catch{message="Waiting for a connection. Check Account if this continues."}
  }
  func stopForSignOut() async throws {
   connectionGate.suspend()
@@ -447,6 +447,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  }
 }
 struct BackupQueueView:View {
+ @AppStorage("showDeveloperTools") private var showDeveloperTools=false
  @AppStorage("selectedTransferTab") private var selectedAppTab="backup"
  @ObservedObject private var model=BackupQueueModel.shared
  @ObservedObject private var thumbnailSync=AcloudThumbnailSyncStatus.shared
@@ -490,7 +491,7 @@ struct BackupQueueView:View {
   NavigationStack {
    List {
     Section {
-     AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Make room for memories.",message:"Choose what to back up. We check each stored file before marking it protected. Keep your originals during beta.").acloudFeatureRow()
+     AcloudHero(icon:"icloud.and.arrow.up",eyebrow:"Acloud backup",title:"Back up your memories.",message:"Save photos and videos to Acloud. Your originals stay in Photos.").acloudFeatureRow()
     }
     Section {
      Picker("Browse backups",selection:$browserMode){Text("Recent saves").tag("gallery");Text("Transfers").tag("transfers")}.pickerStyle(.segmented)
@@ -498,64 +499,72 @@ struct BackupQueueView:View {
     if browserMode == "transfers" {
     Section {
      LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
-      AcloudMetric(title:"Verified resource files",value:protectedCount.formatted(),icon:"checkmark.shield")
-      AcloudMetric(title:"Queued or in progress",value:waitingCount.formatted(),icon:"arrow.triangle.2.circlepath")
-      AcloudMetric(title:"Paused or needs attention",value:attentionCount.formatted(),icon:"exclamationmark.circle")
+      AcloudMetric(title:"Files protected",value:protectedCount.formatted(),icon:"checkmark.shield")
+      AcloudMetric(title:"In progress",value:waitingCount.formatted(),icon:"arrow.triangle.2.circlepath")
+      AcloudMetric(title:"Needs attention",value:attentionCount.formatted(),icon:"exclamationmark.circle")
      }.acloudFeatureRow()
     }
     Section("Add a backup") {
      Button {pickerSelection = .originals} label:{Label("Choose photos and videos",systemImage:"plus.circle.fill").frame(maxWidth:.infinity)}
       .buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
-     Text("Select up to 10 items, then tap Add in Photos to queue your selection. Originals are kept.").font(.footnote).foregroundStyle(.secondary)
+     Text("Choose up to 10 items, then tap Add.").font(.footnote).foregroundStyle(.secondary)
      #if DEBUG
+     if showDeveloperTools {
      HStack {
       Button {pickerSelection = .photo} label:{Label("Photos only",systemImage:"photo.badge.plus")}
       Button {pickerSelection = .video} label:{Label("Videos only",systemImage:"video.badge.plus")}
      }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSelectOriginals || model.busy)
-     Text("Private device test: ordinary photos and unedited videos up to 30 seconds. The existing account, device and upload limits still apply.").font(.footnote).foregroundStyle(.secondary)
+     Text("Videos selected here must be unedited and 30 seconds or shorter.").font(.footnote).foregroundStyle(.secondary)
      if model.complexBackupTestAvailable {
-      Label("Live Photo and edited-photo backup testing enabled",systemImage:"flask").font(.subheadline)
-      Text("Start with one disposable Live Photo or edited photo. Every original, rendered edit and required supporting file must verify. Each file counts toward the existing test limits. Originals stay in Photos. Complex restore and edit-history reconstruction are not enabled by this backup test.").font(.footnote).foregroundStyle(.secondary)
+      Label("Live Photos and edited photos supported",systemImage:"livephoto").font(.subheadline)
+      Text("A Live Photo includes a photo and video. Edited photos include the original and saved edit.").font(.footnote).foregroundStyle(.secondary)
+     }
      }
      #endif
      Toggle("Download iCloud originals on Wi-Fi",isOn:$model.allowICloudOriginals).onChange(of:model.allowICloudOriginals){_,_ in Task{await model.updateOriginalPolicy()}}
-     Text("iCloud downloads happen only when allowed. To choose items, sign in and confirm backup access for this device.").font(.footnote).foregroundStyle(.secondary)
+     Text("Allow this to back up items stored only in iCloud.").font(.footnote).foregroundStyle(.secondary)
      if model.originalProgress>0 {ProgressView("Preparing original",value:model.originalProgress)}
-     Text(model.message).font(.footnote).foregroundStyle(.secondary)
+     if !model.message.isEmpty{Text(model.message).font(.footnote).foregroundStyle(.secondary)}
     }
     } else {
      Section {
       Button{pickerSelection = .originals}label:{Label("Choose photos & videos to back up",systemImage:"plus.circle.fill").frame(maxWidth:.infinity)}
        .buttonStyle(.borderedProminent).disabled(!model.canSelectOriginals || model.busy)
-      Text(model.message).font(.caption).foregroundStyle(.secondary)
+      if !model.message.isEmpty{Text(model.message).font(.caption).foregroundStyle(.secondary)}
       HStack {
-       Text("Up to 10 items. Originals stay in Photos; beta limits apply.").font(.caption).foregroundStyle(.secondary)
+       Text("Choose up to 10 items at a time.").font(.caption).foregroundStyle(.secondary)
        Spacer()
        Button("Backup options"){browserMode="transfers"}.font(.caption)
       }
      }
     }
     if browserMode == "gallery" {
-     Section("Recently saved from transfers") {
+     Section("Recent backups") {
       Button("Browse all saved backups"){selectedAppTab="restore"}.buttonStyle(.borderedProminent)
       AcloudGalleryControls(filter:$galleryFilter,order:$galleryOrder,size:$gallerySize)
       if let account=model.previewAccount{AcloudThumbnailMaintenance(account:account).id(account)}
       if thumbnailSync.pending>0{Text("\(thumbnailSync.pending) small previews waiting to sync over Wi-Fi. Your originals remain protected.").font(.caption).foregroundStyle(.secondary)}
-      if thumbnailSync.waitingForAccess>0{Text("Saved-preview sync is waiting for account or staging-test access. Check Account; your protected originals are unchanged.").font(.caption).foregroundStyle(.secondary)}
-      if thumbnailSync.waitingForBudget>0{Text("Saved-preview sync is waiting for the server rate or storage limit. It will retry later.").font(.caption).foregroundStyle(.secondary)}
+      if thumbnailSync.waitingForAccess>0{Text("Previews are waiting for account access. Check Account.").font(.caption).foregroundStyle(.secondary)}
+      if thumbnailSync.waitingForBudget>0{Text("Previews will sync when more capacity is available.").font(.caption).foregroundStyle(.secondary)}
       if thumbnailSync.failed>0{Text("\(thumbnailSync.failed) saved previews need attention. Your protected originals are unchanged.").font(.caption).foregroundStyle(.secondary)}
-      Text("Tap a thumbnail to view its saved version. This gallery shows completed items from the loaded transfers; open Restore for your protected library.").font(.caption).foregroundStyle(.secondary)
+      Text("Recent completed backups. Open Saved to browse more.").font(.caption).foregroundStyle(.secondary)
       if savedGallery.isEmpty{ContentUnavailableView("No matching saved items on this page",systemImage:"photo.on.rectangle",description:Text("Try another filter or check Transfers for work in progress."))}
       AcloudGalleryGrid(items:savedGallery,order:galleryOrder,size:gallerySize,onSelect:{_ in},onOpen:{entry in galleryViewer=AcloudGalleryPresentation(items:savedGallery,startID:entry.id)})
      }
     } else {
     Section("Your transfers") {
+     if waitingCount>0 || attentionCount>0 {
+      ViewThatFits(in:.horizontal){
+       HStack{transferControls}
+       VStack(alignment:.leading){transferControls}
+      }.buttonStyle(.bordered).disabled(model.busy)
+     }
      Picker("Media type",selection:$transferFilter) {
       ForEach(AcloudMediaFilter.allCases){filter in Text(filter.rawValue).tag(filter)}
      }.pickerStyle(.segmented)
      Picker("Transfer status",selection:$queueFilter) {ForEach(QueueFilter.allCases,id:\.self){filter in Text(filter.rawValue).tag(filter)}}
-     Text("Live Photos and edits can include several files. A file is protected only after verification.").font(.caption).foregroundStyle(.secondary)
-     Text("Newest first within each group · \(visibleTransfers.count) shown")
+     Text("Live Photos and edited photos include additional files.").font(.caption).foregroundStyle(.secondary)
+     Text("\(visibleTransfers.count) transfers · newest first")
       .font(.caption).foregroundStyle(.secondary)
      if model.items.isEmpty {
       ContentUnavailableView("Your first backup starts here",systemImage:"icloud.and.arrow.up",description:Text("Choose a photo or video above to see its progress here."))
@@ -572,33 +581,35 @@ struct BackupQueueView:View {
      if model.showingOlderTransfers{Button("Latest transfers"){Task{await model.loadLatestTransfers()}}}
     }}
     if browserMode == "transfers",!model.manifests.isEmpty {
-     Section("Backup completeness") {
+     Section("Backup details") {
       ForEach(model.manifests){manifest in
        VStack(alignment:.leading,spacing:10) {
         AcloudMediaHeader(type:manifest.source.mediaType,reference:manifest.id,previewSource:.backupVersion,sourceCaptureDate:manifest.source.creation,previewAccount:manifest.binding.accountID,previewAsset:previewResource(manifest)?.serverAssetID,previewChecksum:previewResource(manifest)?.expectedSha256,dateLabel:"Backup added",date:manifest.createdAt,detail:manifest.source.kind == .livePhoto ? "Live Photo":manifest.source.kind == .rawJPEG ? "RAW + JPEG":manifest.source.kind == .edited ? "Edited media":"Original media")
-        Label([.fullyProtected,.restoreReady].contains(manifest.state) ? "Required files verified":manifest.state == .sourceChanged ? "Original changed — select it again":"Still checking required files",systemImage:[.fullyProtected,.restoreReady].contains(manifest.state) ? "checkmark.shield.fill":"square.stack.3d.up")
+        Label([.fullyProtected,.restoreReady].contains(manifest.state) ? "Backup complete":manifest.state == .sourceChanged ? "Original changed — select it again":"Finishing backup",systemImage:[.fullyProtected,.restoreReady].contains(manifest.state) ? "checkmark.shield.fill":"square.stack.3d.up")
         ProgressView(value:Double(manifest.required.filter{$0.status=="PROTECTED"}.count),total:Double(max(1,manifest.required.count))).accessibilityLabel("Required files verified")
-        Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) required files protected").font(.caption)
-        DisclosureGroup("Details") {Text("All required files must verify together. Live Photo/edited-photo restore is a separate pending test; removing device copies remains disabled.").font(.footnote).foregroundStyle(.secondary)}
+        Text("\(manifest.required.filter{$0.status=="PROTECTED"}.count) of \(manifest.required.count) files protected").font(.caption)
+        DisclosureGroup("Details") {Text("All parts of this item must be saved before its backup is complete.").font(.footnote).foregroundStyle(.secondary)}
        }.padding(.vertical,8)
       }
      }
     }
     #if DEBUG
-    Section {
-     DisclosureGroup("Development tools") {
+    if showDeveloperTools {Section {
+     DisclosureGroup("Developer tools") {
       Button("Queue generated 20 MiB file"){Task{await model.enqueueGenerated()}}
-      Button("Pause all"){Task{await model.pauseAll()}}
-      Button("Resume all"){Task{await model.resumeAll()}}
-      Button("Retry failed"){Task{await model.retryFailed()}}
      }.disabled(model.busy)
-    }
+    }}
     #endif
    }.acloudCanvas().navigationTitle("Backup")
   }.sheet(item:$pickerSelection){selection in OriginalAssetPicker(filter:selection == .video ? .videos:selection == .photo ? .images:.any(of:[.images,.videos])){result in pickerSelection=nil;guard let result else{return};transferFilter = .all;queueFilter = .all;browserMode="transfers";Task{await model.enqueueSelected(result.identifiers,unavailableCount:result.unavailableCount)}}.id(selection.id)}
    .sheet(item:$galleryViewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
    .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
    .task{await model.refresh()}
+ }
+ @ViewBuilder private var transferControls:some View {
+  if waitingCount>0{Button("Pause all"){Task{await model.pauseAll()}}}
+  if (model.summary[.paused] ?? 0)>0{Button("Resume all"){Task{await model.resumeAll()}}}
+  if (model.summary[.failedPermanent] ?? 0)+(model.summary[.failedRetryable] ?? 0)>0{Button("Retry failed"){Task{await model.retryFailed()}}}
  }
  private func previewResource(_ manifest:MediaManifest)->ManifestResource? {
   let verified=manifest.required.filter{$0.status=="PROTECTED"}

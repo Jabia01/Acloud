@@ -56,7 +56,7 @@ struct StorageView:View {
        Text("\(acloudCapacity(cloud.protectedBytes)) protected").font(.system(.title2,design:.rounded).weight(.bold))
        ProgressView(value:Double(min(cloud.protectedBytes,cloud.quotaBytes)),total:Double(max(1,cloud.quotaBytes))).accessibilityLabel("Cloud storage used")
        Text("\(acloudCapacity(cloud.quotaBytes)) total capacity").foregroundStyle(.secondary)
-       Text("Capacity uses GiB: a 5 GB plan is about 4.7 GiB. Live Photos and edits may contain several resource files.").font(.caption).foregroundStyle(.secondary)
+       DisclosureGroup("About storage amounts"){Text("Storage is shown in GiB: 5 GB is about 4.7 GiB. Live Photos and edited photos may use more than one file.").font(.caption).foregroundStyle(.secondary)}
        if cloud.overQuota {Label("Storage limit reached. Existing verified backups are retained.",systemImage:"exclamationmark.circle").foregroundStyle(.orange)}
       }.padding(.vertical,10)
       LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
@@ -65,7 +65,7 @@ struct StorageView:View {
       }.acloudFeatureRow()
      } else {
       Label("Storage usage is unavailable",systemImage:"externaldrive.badge.questionmark").font(.headline)
-      Text("Sign in and check your connection, then refresh. No storage amount is estimated here.").foregroundStyle(.secondary)
+      Text("Sign in and check your connection, then refresh.").foregroundStyle(.secondary)
      }
      if model.summaryRefreshing{ProgressView(model.cloud == nil ? "Loading storage…":"Updating storage…")}
      if let updated=model.summaryUpdatedAt{Text("Updated \(updated.formatted(date:.abbreviated,time:.shortened))").font(.caption).foregroundStyle(.secondary)}
@@ -74,7 +74,7 @@ struct StorageView:View {
     }
     Section("Device space") {
      Label("Your originals stay on your device",systemImage:"iphone.and.arrow.forward").font(.headline)
-     Text("Free Up Space is unavailable unless its separate safety checks are approved. Keep another copy of your originals during beta.").foregroundStyle(.secondary)
+     Text(model.enabled ? "Review protected items before removing device copies.":"Free Up Space isn’t available yet. Backing up does not remove anything from your device.").foregroundStyle(.secondary)
      if model.enabled {
       NavigationLink("Review Free Up Space") {StorageManagementView(model:model)}
      }

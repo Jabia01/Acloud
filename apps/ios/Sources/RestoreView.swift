@@ -78,7 +78,7 @@ private extension RestoreState {
  #else
  nextCursor=page.nextCursor
  #endif
-if next{selected=[]}else{selected.formIntersection(Set(assets.map(\.id)))};message=canRestore ? (ownerTestAssets != nil ? "Private staging test: select up to 10 eligible photos or videos. This creates a new Photos copy; keep originals." : "Select protected versions explicitly. Restoring creates new Photos items."):"Restore access is not currently enabled for this session. Existing cloud backups stay protected."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
+if next{selected=[]}else{selected.formIntersection(Set(assets.map(\.id)))};message=canRestore ? "":"Restore access is not currently enabled for this session. Existing cloud backups stay protected."}catch{message="Protected library unavailable. Sign in or retry when connected."}}
  var hasNextAssets:Bool{nextCursor != nil}
  func refresh(next:Bool=false)async{do{try await connect();if let queue,let account,let library{if next{queueAnchor=queueCursor};let requestedAnchor=queueAnchor;let page=try await queue.recent(account:account,library:library,after:requestedAnchor,limit:100);guard queueAnchor==requestedAnchor else{return};items=page;showingLaterQueuePage=queueAnchor != nil;queueCursor=items.last?.id;if let compoundQueue{compounds=try await compoundQueue.page(account:account,library:library,limit:100)}};progress=await coordinator?.progressSnapshot() ?? [:];await observeTransferAlerts()}catch{message="Restore is paused. Your queue is retained."}}
  private func observeTransferAlerts() async {
@@ -160,7 +160,7 @@ if next{selected=[]}else{selected.formIntersection(Set(assets.map(\.id)))};messa
  func tick()async{do{try await connect();if canRestore,worker==nil,let coordinator{worker=Task{await coordinator.runDue();if let compoundCoordinator=self.compoundCoordinator{await compoundCoordinator.runDue()};await self.observeTransferAlerts();self.worker=nil}};await refresh()}catch{await coordinator?.deactivate();message="Authorization unavailable; no new Photos saves."}}
  func control(_ item:RestoreItem,_ action:String)async{do{try await connect();if action=="pause"{try await coordinator?.pause(item.id)}else if action=="cancel"{try await coordinator?.cancel(item.id)}else{try await coordinator?.resume(item.id)};await refresh()}catch{message="Save outcome requires review; an uncertain Photos save is never retried automatically."}}
  func compoundControl(_ r:CompoundRestoreRecord,_ action:String)async{do{try await connect();if action=="pause"{try await compoundCoordinator?.pause(r.id)}else if action=="cancel"{try await compoundCoordinator?.cancel(r.id)}else{try await compoundCoordinator?.resume(r.id)};await refresh()}catch{message="An uncertain Photos save requires reconciliation before retry."}}
- func restoreVariant(_ asset:UUID,choice:ManifestRestoreChoice)async{do{try await connect();guard canRestore,let api,let compoundQueue,let account,let library,let manifest=try await api.manifestForAsset(asset) else{throw RestoreFailure.disabled};let plan=try await api.compoundPlan(manifest.id,fingerprint:manifest.manifestFingerprint,choice:choice);try await compoundQueue.insert(CompoundRestoreRecord(account:account,library:library,plan:plan));await refresh()}catch{message="This restore variant is unsupported or awaits fidelity acceptance."}}
+ func restoreVariant(_ asset:UUID,choice:ManifestRestoreChoice)async{do{try await connect();guard canRestore,let api,let compoundQueue,let account,let library,let manifest=try await api.manifestForAsset(asset) else{throw RestoreFailure.disabled};let plan=try await api.compoundPlan(manifest.id,fingerprint:manifest.manifestFingerprint,choice:choice);try await compoundQueue.insert(CompoundRestoreRecord(account:account,library:library,plan:plan));await refresh()}catch{message="This version cannot be restored yet. Try the original or contact support."}}
  func localPreviewID(for asset:UUID)->String? {
   guard let account else{return nil}
   guard let item=BackupQueueModel.shared.items.first(where:{$0.assetID==asset && $0.accountID==account}) else{return nil}
@@ -200,11 +200,11 @@ struct RestoreView:View {
   NavigationStack {
    List {
     Section {
-     AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Your saved memories.",message:"Browse verified backups. Select items to restore a new copy to Photos; your cloud backups stay unchanged.").acloudFeatureRow()
+     AcloudHero(icon:"arrow.down.circle",eyebrow:"Bring it back",title:"Your saved memories.",message:"Browse your saved photos and videos. Select items to restore to Photos.").acloudFeatureRow()
     }
     Section {
-     Text("Save a new copy to Photos. Your cloud backup stays unchanged; restored items may sync to iCloud.").font(.subheadline).foregroundStyle(.secondary)
-     Text(model.message).font(.caption).foregroundStyle(.secondary)
+     Text("Restored items may sync to iCloud. Your saved backups stay in Acloud.").font(.subheadline).foregroundStyle(.secondary)
+     if !model.message.isEmpty{Text(model.message).font(.caption).foregroundStyle(.secondary)}
      if PHPhotoLibrary.authorizationStatus(for:.addOnly) != .authorized && ![PHAuthorizationStatus.authorized,.limited].contains(PHPhotoLibrary.authorizationStatus(for:.readWrite)) {
       Button("Allow saving to Photos"){Task{await model.requestPermission()}}.disabled(!model.canRestore)
      }
@@ -224,7 +224,7 @@ struct RestoreView:View {
       }
      }
      Text(selecting ? "Tap photos to select them. Up to 10 per restore batch.":"Tap a thumbnail to view. Choose Select to restore several items together.").font(.footnote).foregroundStyle(.secondary)
-     if !model.canRestore{Text("Restore access is unavailable for this session. Sign in again or ask the owner to check device access. Existing cloud backups stay protected.").foregroundStyle(.secondary)}
+     if !model.canRestore{Text("Restore is unavailable. Sign in again or contact support. Your backups are still saved.").foregroundStyle(.secondary)}
      else if gallery.isEmpty{ContentUnavailableView("No matching saved items",systemImage:"photo.on.rectangle",description:Text("Try another media filter or refresh the protected library."))}
      AcloudGalleryGrid(items:gallery,order:galleryOrder,size:gallerySize,selecting:selecting,selected:Set(model.selected.map(\.uuidString)),onSelect:{entry in if let id=UUID(uuidString:entry.id){model.select(id,on:!model.selected.contains(id))}},onOpen:{entry in viewer=AcloudGalleryPresentation(items:gallery,startID:entry.id)})
       .disabled(model.busy)
@@ -232,9 +232,7 @@ struct RestoreView:View {
     Section {
      DisclosureGroup("Restore options & information") {
      Text(RestoreCopy.iCloudWarning).font(.footnote)
-     Text("Restore creates a new Photos copy. Cloud protection and quota stay unchanged.").font(.footnote)
-     Text(model.message).font(.subheadline)
-     if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))").font(.caption)}
+          if let bytes=model.availableBytes{Text("Estimated device space: \(bytes.formatted(.byteCount(style:.file)))").font(.caption)}
      VStack(alignment:.leading,spacing:8) {
       Label(model.selected.isEmpty ? "Choose items in the gallery":"\(model.selected.count) of 10 selected",systemImage:"checkmark.circle").font(.headline)
       Text(model.selected.isEmpty ? "Select photos or videos to see the restore size here.":"\(model.selectedPhotos) photos · \(model.selectedVideos) videos · \(model.selectedBytes.formatted(.byteCount(style:.file)))").font(.subheadline).foregroundStyle(.secondary)
@@ -246,10 +244,10 @@ struct RestoreView:View {
      }
     }
     Section {
-     Button("Refresh protected library"){Task{await model.loadAssets()}}.disabled(model.busy)
-     if model.hasNextAssets{Button("Next protected page"){Task{await model.loadAssets(next:true)}}.disabled(model.busy)}
-     DisclosureGroup("Advanced restore: Live Photos and edits") {
-      Text("Live Photos require both resources. Edited assets require an explicit original or rendered choice; adjustment recipes cannot be reapplied exactly.").font(.footnote)
+     Button("Refresh saved items"){Task{await model.loadAssets()}}.disabled(model.busy)
+     if model.hasNextAssets{Button("Next page"){Task{await model.loadAssets(next:true)}}.disabled(model.busy)}
+     DisclosureGroup("Live Photo and edited-photo options") {
+      Text("Live Photos restore with their video. For edited photos, choose the original or saved edit. Editing history is not restored.").font(.footnote)
       ForEach(model.assets.filter{mediaFilter.includes($0.mediaType)}){asset in
        VStack(alignment:.leading,spacing:8) {
         AcloudMediaHeader(type:asset.mediaType,reference:asset.id,previewSource:.backupVersion,previewAccount:model.previewAccount,previewAsset:asset.id,previewChecksum:model.previewChecksum(asset.id),dateLabel:"Backed up",date:asset.backupDate)
@@ -271,8 +269,8 @@ struct RestoreView:View {
      Section {ForEach(group.items){record in compoundRow(record)}} header:{AcloudMediaGroupTitle(title:group.title+" · complete-media restores",date:group.day)}
     }
     if model.items.count==100 || model.showingLaterQueuePage{Section{
-     if model.items.count==100{Button("Next queue page"){Task{await model.refresh(next:true)}}}
-     if model.showingLaterQueuePage{Button("First queue page"){Task{await model.firstQueuePage()}}}
+     if model.items.count==100{Button("More transfers"){Task{await model.refresh(next:true)}}}
+     if model.showingLaterQueuePage{Button("Latest transfers"){Task{await model.firstQueuePage()}}}
     }}
    }.acloudCanvas().navigationTitle("Saved in Acloud")
     .safeAreaInset(edge:.bottom) {
@@ -323,7 +321,7 @@ struct RestoreView:View {
  }
  @ViewBuilder private func variantActions(_ id:UUID)->some View {
   Button("Restore original"){Task{await model.restoreVariant(id,choice:.original)}}
-  Button("Restore rendered edit"){Task{await model.restoreVariant(id,choice:.edited)}}
+  Button("Restore edited version"){Task{await model.restoreVariant(id,choice:.edited)}}
  }
  @ViewBuilder private func restoreActions(_ item:RestoreItem)->some View {
   if [.paused,.retryable,.permanent].contains(item.state){Button("Resume / Retry"){Task{await model.control(item,"resume")}}}
@@ -333,7 +331,7 @@ struct RestoreView:View {
  private func restoreGuidance(_ code:String)->String {
   if code.hasPrefix("PHOTOS_SAVE_ERROR_"){return "Photos reported a save error (code \(code.dropFirst(18))). This copy is unconfirmed; review before restoring again."}
   if code=="SAVE_RESULT_UNCERTAIN"{return "Photos may already contain this copy. Review before restoring again."}
-  if code=="INTEGRITY_FAILED"{return "Downloaded bytes failed integrity checks."}
+  if code=="INTEGRITY_FAILED"{return "The downloaded file could not be verified. Try again."}
   if code=="PHOTOS_PERMISSION_REQUIRED"{return "Allow Photos additions to continue."}
   return "Restore paused or requires a retry."
  }

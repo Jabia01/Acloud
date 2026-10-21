@@ -177,11 +177,10 @@ struct DiscoveryView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment:.leading,spacing:18) {
-                    AcloudHero(icon:"photo.on.rectangle",eyebrow:"On your device",title:"Your library. Your choice.",message:"See the photos and videos you allow Acloud to access. Scanning your library never uploads or deletes an original.")
+                    AcloudHero(icon:"photo.on.rectangle",eyebrow:"On your device",title:"Your library. Your choice.",message:"Browse your photos and videos. Back up only what you choose.")
                     HStack {
                         VStack(alignment:.leading,spacing:4) {
                             Text("On this device").font(.title2.bold())
-                            Text("Browse your Photos library. Back up only what you choose.").font(.subheadline).foregroundStyle(.secondary)
                         }
                         Spacer()
                         if model.authorization.canRead {Button(selecting ? "Done":"Select"){selecting.toggle()}.buttonStyle(.bordered)}
@@ -201,11 +200,11 @@ struct DiscoveryView: View {
                         else if visible.isEmpty {ContentUnavailableView("No matching items",systemImage:"photo.on.rectangle",description:Text("Try another media filter or load more photos."))}
                         AcloudGalleryGrid(items:visible,order:order,size:size,selecting:selecting,selected:selected,onSelect:select,onOpen:{entry in viewer=AcloudGalleryPresentation(items:visible,startID:entry.id)})
                         HStack {
-                            Text("\(model.gallery.count.formatted()) of \(model.galleryTotal.formatted()) accessible items loaded").font(.caption).foregroundStyle(.secondary)
+                            Text("\(model.gallery.count.formatted()) of \(model.galleryTotal.formatted()) items loaded").font(.caption).foregroundStyle(.secondary)
                             Spacer()
                             if model.gallery.count<model.galleryTotal {Button("Load more"){Task{await model.loadMorePhotos()}}.disabled(model.galleryLoading)}
                         }
-                        Text("Device previews stay local. iCloud-only originals are not downloaded for browsing.").font(.caption).foregroundStyle(.secondary)
+                        Text("Browsing does not upload your photos.").font(.caption).foregroundStyle(.secondary)
                         DisclosureGroup("Library scan details") {
                             if let summary=model.summary {Text("\(summary.images.formatted()) photos · \(summary.videos.formatted()) videos")}
                             if model.scanning,let progress=model.progress {ProgressView(value:Double(progress.processed),total:Double(max(1,progress.total)));Text("\(progress.processed.formatted()) of \(progress.total.formatted()) scanned")}
