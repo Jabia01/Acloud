@@ -81,3 +81,22 @@ export async function ownerTestRestoreIds(c:PoolClient,p:Principal){
     AND a.storage_provider='backblaze_b2' AND a.status='PROTECTED' AND a.privacy_deleted_at IS NULL
     AND a.media_type IN ('image','video') AND a.expected_size_bytes BETWEEN 1 AND $5 ORDER BY a.created_at LIMIT $6`,[p.userId,cfg.device,new Date(cfg.start),new Date(cfg.end),OWNER_TEST_FILE_BYTES,cfg.maxFiles])).rows.map(r=>r.id as string);
 }
+
+// Original downloads may be initiated by a live web session on the approved
+// account. This grants no upload, Photos restore or access outside the test scope.
+export async function ownerTestDownloadAsset(c:PoolClient,p:Principal,id:string){
+ const cfg=ownerTestConfiguration(),now=Date.now();
+ if(!cfg||now<cfg.start||now>=cfg.end||p.userId!==cfg.account||!p.deviceId)throw deny();
+ if(p.deviceId===cfg.device)return ownerTestAsset(c,p,id,['downloads']);
+ const live=await c.query(`SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id JOIN devices d ON d.id=s.device_id AND d.user_id=u.id
+  WHERE s.id=$1 AND s.user_id=$2 AND s.device_id=$3 AND s.revoked_at IS NULL AND s.expires_at>now()
+  AND d.revoked_at IS NULL AND d.platform='web' AND u.status='ACTIVE' AND u.privacy_state='ACTIVE'
+  AND u.email_verified_at IS NOT NULL AND u.abuse_review=false`,[p.sessionId,cfg.account,p.deviceId]);
+ if(!live.rowCount)throw deny();
+ const switches=await c.query("SELECT name,blocked FROM beta_switches WHERE name='downloads'");
+ if(!switches.rows.some(r=>r.name==='downloads'&&r.blocked===false))throw deny();
+ const asset=await c.query(`SELECT a.id FROM assets a JOIN upload_sessions s ON s.asset_id=a.id AND s.user_id=a.user_id
+  WHERE a.id=$1 AND a.user_id=$2 AND a.device_id=$3 AND a.created_at >= $4 AND a.created_at < $5
+  AND a.storage_provider='backblaze_b2' AND a.privacy_deleted_at IS NULL AND a.expected_size_bytes BETWEEN 1 AND $6`,[id,cfg.account,cfg.device,new Date(cfg.start),new Date(cfg.end),OWNER_TEST_FILE_BYTES]);
+ if(!asset.rowCount)throw deny();
+}

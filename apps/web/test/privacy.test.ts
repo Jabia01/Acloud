@@ -13,3 +13,9 @@ test('export history is allowlisted and projects only status metadata',()=>{
  assert.equal(privacyRoute('GET',['exports']),'/privacy/exports');assert.equal(privacyRoute('POST',['exports']),null);
  const result=publicPrivacyResult('exports',{items:[{exportId:randomUUID(),state:'READY',createdAt:'generated',expiresAt:'generated',encrypted_payload:'PRIVATE'}]});assert.ok(result);assert.ok(!JSON.stringify(result).includes('PRIVATE'));
 });
+
+test('manifest-only polling is allowlisted and never projects account rows',()=>{
+ const id=randomUUID();assert.equal(privacyRoute('GET',['exports',id,'manifest']),`/privacy/exports/${id}/manifest`);
+ assert.equal(privacyRoute('POST',['exports',id,'manifest']),null);
+ assert.ok(!JSON.stringify(publicPrivacyResult(`exports/${id}/manifest`,{state:'READY',manifest:{schemaVersion:2},data:{account:'PRIVATE'}})).includes('PRIVATE'));
+});

@@ -1,5 +1,6 @@
+import {originalDownloadName} from './download-name';
 import {savedThumbnailKey} from '../restore/saved-version';
-import {ownerTestConfigured,ownerTestAsset,ownerTestBound,ownerTestTTL} from '../beta/owner-test';
+import {ownerTestConfigured,ownerTestAsset,ownerTestDownloadAsset,ownerTestBound,ownerTestTTL} from '../beta/owner-test';
 import {BetaPolicy} from '../beta/policy';import {betaConfiguration} from '../beta/config';
 import {limitSetting} from '../hardening/config';
 import {EntitlementService} from '../billing/entitlement';
@@ -340,14 +341,16 @@ export class UploadService {
     await this.beta.open('downloads');
     return this.db.transaction(async c => {
       await this.lock(c,p);
-      if(ownerTestBound(p))await ownerTestAsset(c,p,id,['downloads']);
+      if(ownerTestBound(p))await ownerTestDownloadAsset(c,p,id);
       const r=(await c.query('SELECT * FROM assets WHERE id=$1 AND user_id=$2 AND privacy_deleted_at IS NULL',[id,p.userId])).rows[0];
       if (!r) { void this.db.query("INSERT INTO operational_security_events(id,code) VALUES($1,'UPLOAD_TARGET_UNAVAILABLE')",[randomUUID()]).catch(()=>{}); throw new NotFoundException('Asset unavailable'); }
       if (r.status!=='PROTECTED') throw new ConflictException('Asset is not protected');
       this.storage.assertBinding(r.storage_provider,r.storage_binding);
       // Local signing while holding the same user lock as revocation closes the guard/sign gap.
       // Previously issued storage capabilities still live until their short expiry.
-      return this.storage.createDownloadAuthorization(r.storage_object_key,r.storage_version_id,ownerTestTTL(downloadTTL()));
+      const formats=(await c.query('SELECT DISTINCT uti FROM media_manifest_resources WHERE user_id=$1 AND asset_id=$2 AND expected_sha256=$3 AND expected_size=$4 LIMIT 2',[p.userId,id,r.expected_checksum,r.verified_size_bytes])).rows;
+      const name=originalDownloadName(id,r.media_type,formats.length===1?formats[0].uti:undefined);
+      return this.storage.createDownloadAuthorization(r.storage_object_key,r.storage_version_id,ownerTestTTL(downloadTTL()),name);
     });
   }
 }

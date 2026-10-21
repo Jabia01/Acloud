@@ -137,4 +137,16 @@ describe('private owner device staging mode',{concurrency:false},()=>{
  test('disabling mode revokes new downloads for the configured owner',async()=>{const r=await protectedAsset();process.env.OWNER_DEVICE_TEST_ENABLED='false';await assert.rejects(uploads.download(p,r.assetId));await assert.rejects(restore.evidence(p,r.assetId));});
  test('signed URL lifetime cannot exceed the test window',async()=>{const {ownerTestTTL}=require('../dist/beta/owner-test.js');process.env.OWNER_DEVICE_TEST_EXPIRES_AT=new Date(Date.now()+10000).toISOString();assert.ok(ownerTestTTL(300)<=10);});
  test('checksum failure never becomes protected',async()=>{const r=await uploads.create(p,input(),randomUUID());await uploads.multipartStart(p,r.id);await uploads.completeMultipart(p,r.id);const verify=storage.verifyObject;storage.verifyObject=async()=>({ok:false,code:'CHECKSUM_MISMATCH'});try{assert.equal((await uploads.complete(p,r.id)).status,'FAILED');await assert.rejects(restore.evidence(p,r.assetId));}finally{storage.verifyObject=verify;}});
+ test('same owner web session downloads only scoped protected originals; never uploads or restores',async()=>{
+  const asset=await protectedAsset(),browser={...p,deviceId:randomUUID(),sessionId:randomUUID()};
+  await pool.query("INSERT INTO devices(id,user_id,device_identifier,display_name,platform) VALUES($1,$2,$3,'Web fixture','web')",[browser.deviceId,p.userId,randomUUID()]);
+  await pool.query("INSERT INTO sessions(id,user_id,device_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')",[browser.sessionId,p.userId,browser.deviceId,randomUUID().replaceAll('-','').repeat(2)]);
+  assert.equal((await uploads.download(browser,asset.assetId)).method,'GET');
+  assert.throws(()=>ownerTestIdentity(browser));await assert.rejects(uploads.create(browser,input(),randomUUID()));
+  await pool.query("UPDATE beta_switches SET blocked=true WHERE name='downloads'");await assert.rejects(uploads.download(browser,asset.assetId));await pool.query("UPDATE beta_switches SET blocked=false WHERE name='downloads'");
+  await pool.query("UPDATE devices SET platform='ios' WHERE id=$1",[browser.deviceId]);await assert.rejects(uploads.download(browser,asset.assetId));await pool.query("UPDATE devices SET platform='web' WHERE id=$1",[browser.deviceId]);
+  await pool.query('UPDATE assets SET privacy_deleted_at=now() WHERE id=$1',[asset.assetId]);await assert.rejects(uploads.download(browser,asset.assetId));await pool.query('UPDATE assets SET privacy_deleted_at=NULL WHERE id=$1',[asset.assetId]);
+  await pool.query('UPDATE sessions SET revoked_at=now() WHERE id=$1',[browser.sessionId]);await assert.rejects(uploads.download(browser,asset.assetId));
+ });
+
 });

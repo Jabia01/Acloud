@@ -25,7 +25,7 @@ export function safeDownload(value:unknown): {url:string;expiresAt:string}|null 
   const v=value as Record<string,unknown>;
   if(v.method!=='GET' || typeof v.url!=='string' || typeof v.expiresAt!=='string') return null;
   try { const u=new URL(v.url); const ttl=Date.parse(v.expiresAt)-Date.now();
-    if(u.username || u.password || (u.protocol!=='https:' && !(u.protocol==='http:' && ['localhost','127.0.0.1'].includes(u.hostname))) || ttl<=0 || ttl>61000) return null;
+    if(u.username || u.password || u.hash || (u.protocol!=='https:' && !(u.protocol==='http:' && ['localhost','127.0.0.1'].includes(u.hostname))) || !Number.isFinite(ttl) || ttl<=0 || ttl>61000) return null;
     return {url:v.url,expiresAt:v.expiresAt};
   } catch { return null; }
 }
@@ -33,7 +33,7 @@ export class SessionExpired extends Error {}
 export async function controlRequest<T>(path:string, method='GET', transport:typeof fetch=fetch):Promise<T> {
   const response=await transport(path,{method,cache:'no-store',credentials:'same-origin',...(method==='POST' ? {headers:{'Content-Type':'application/json'},body:'{}'} : {})});
   if(response.status===401) throw new SessionExpired();
-  if(!response.ok) throw new Error(response.status===403&&path.endsWith('/download') ? 'This device is not allowed to download this item. During restricted staging testing, use the registered iPad.' : response.status===404 ? 'Item unavailable.' : 'Service unavailable. Please try again.');
+  if(!response.ok) throw new Error(response.status===403&&path.endsWith('/download') ? 'Downloads are unavailable for this account or session. Sign in again or contact support.' : response.status===404 ? 'Item unavailable.' : 'Service unavailable. Please try again.');
   return response.json() as Promise<T>;
 }
 

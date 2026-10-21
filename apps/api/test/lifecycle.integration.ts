@@ -142,3 +142,25 @@ test('ACL015 actual pre-deletion pg_dump restore replays independent tombstone a
 finally {
     await rm(backupDirectory, { recursive: true, force: true });
 } });
+
+test('export manifest status excludes decrypted data and rejects revoked sessions',async()=>{
+ const p=await account(),id=randomUUID();await pool.query("INSERT INTO privacy_exports(id,user_id,expires_at) VALUES($1,$2,now()+interval '1 day')",[id,p.userId]);
+ for(let n=0;n<25&&await exportsService.build(p.userId,id);n++);
+ const result=await exportsService.result(p,id,true);assert.equal(result.state,'READY');assert.ok(result.manifest);assert.equal('data' in result,false);
+ await pool.query('UPDATE sessions SET revoked_at=now() WHERE id=$1',[p.sessionId]);await assert.rejects(exportsService.result(p,id,true));
+});
+test('export job failures release request state only after terminal failure and matching lease',async()=>{
+ const p=await account(),id=randomUUID(),jobs=new DurableJobs(db);await pool.query("INSERT INTO privacy_exports(id,user_id,expires_at) VALUES($1,$2,now()+interval '1 day')",[id,p.userId]);
+ await pool.query('INSERT INTO privacy_export_jobs(id,user_id,expires_at) SELECT id,user_id,expires_at FROM privacy_exports WHERE id=$1',[id]);
+ const jobId=await jobs.enqueue('PRIVACY_EXPORT',id,{userId:p.userId,exportId:id}),lease=randomUUID();
+ await pool.query("UPDATE durable_jobs SET state='RUNNING',attempts=1,max_attempts=2,lease_id=$2,lease_until=now()+interval '1 minute' WHERE id=$1",[jobId,lease]);
+ const job={id:jobId,kind:'PRIVACY_EXPORT' as const,payload:{userId:p.userId,exportId:id},lease_id:lease,attempts:1,max_attempts:2};await jobs.fail(job);
+ assert.equal((await pool.query('SELECT state FROM privacy_exports WHERE id=$1',[id])).rows[0].state,'PENDING');
+ await pool.query("UPDATE durable_jobs SET state='RUNNING',attempts=2,lease_until=now()+interval '1 minute' WHERE id=$1",[jobId]);
+ await jobs.fail({...job,lease_id:randomUUID()});assert.equal((await pool.query('SELECT state FROM privacy_export_jobs WHERE id=$1',[id])).rows[0].state,'BUILDING');
+ await jobs.fail({...job,attempts:2});assert.equal((await pool.query('SELECT state FROM privacy_exports WHERE id=$1',[id])).rows[0].state,'FAILED');assert.equal((await pool.query('SELECT state FROM privacy_export_jobs WHERE id=$1',[id])).rows[0].state,'FAILED');
+});
+test('exhausted worker lease marks its export failed',async()=>{
+ const p=await account(),id=randomUUID(),jobs=new DurableJobs(db);await pool.query("INSERT INTO privacy_exports(id,user_id,expires_at) VALUES($1,$2,now()+interval '1 day')",[id,p.userId]);await pool.query('INSERT INTO privacy_export_jobs(id,user_id,expires_at) SELECT id,user_id,expires_at FROM privacy_exports WHERE id=$1',[id]);
+ const jobId=await jobs.enqueue('PRIVACY_EXPORT',id,{userId:p.userId,exportId:id});await pool.query("UPDATE durable_jobs SET state='RUNNING',attempts=max_attempts,lease_id=$2,lease_until=now()-interval '1 second' WHERE id=$1",[jobId,randomUUID()]);await jobs.claim();assert.equal((await pool.query('SELECT state FROM privacy_export_jobs WHERE id=$1',[id])).rows[0].state,'FAILED');
+});

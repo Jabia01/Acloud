@@ -23,7 +23,7 @@ export abstract class ObjectStorageProvider {
   abstract createUploadAuthorization(key: string, size: number, checksum: string, ttlSeconds: number): Promise<UploadAuthorization>;
   abstract getObjectMetadata(key: string, versionId?: string): Promise<ObjectMetadata>;
   abstract verifyObject(key: string, expectedSize: number, expectedChecksum: string, versionId?: string): Promise<VerificationResult>;
-  abstract createDownloadAuthorization(key: string, versionId: string, ttlSeconds: number): Promise<DownloadAuthorization>;
+  abstract createDownloadAuthorization(key: string, versionId: string, ttlSeconds: number,filename?:string): Promise<DownloadAuthorization>;
   // No public deletion route. Callers must supply separately audited explicit authorization.
   async versionsForDeletion(_key:string):Promise<string[]>{throw new Error('Version inventory unavailable');}
   abstract deleteObject(key: string, versionId: string): Promise<void>;
@@ -156,12 +156,13 @@ export class S3ObjectStorageProvider extends ObjectStorageProvider {
       return {ok:false,code:error?.$metadata?.httpStatusCode === 404 ? 'OBJECT_MISSING' : 'STORAGE_UNAVAILABLE'};
     } finally { this.logger.debug({code:'STORAGE_VERIFICATION_DURATION',durationMs:Math.round(performance.now()-started)});this.releaseClient(client); }
   }
-  async createDownloadAuthorization(key: string, versionId: string, ttlSeconds: number): Promise<DownloadAuthorization> {
+  async createDownloadAuthorization(key: string, versionId: string, ttlSeconds: number,filename?:string): Promise<DownloadAuthorization> {
     if(!versionId||versionId==='null'||!Number.isInteger(ttlSeconds)||ttlSeconds<1||ttlSeconds>60)throw new Error('Invalid download authorization');
+    if(filename!==undefined&&!/^[a-z0-9][a-z0-9.-]{0,99}$/i.test(filename))throw new Error('Invalid download name');
     const client = this.client(true);
     try {
       await this.ensurePrivate(client);
-      const url = await getSignedUrl(client,new GetObjectCommand({Bucket:this.bucket,Key:key,VersionId:versionId,ResponseContentDisposition:'attachment; filename="download.bin"',ResponseContentType:'application/octet-stream'}),{expiresIn:ttlSeconds});
+      const url = await getSignedUrl(client,new GetObjectCommand({Bucket:this.bucket,Key:key,VersionId:versionId,ResponseContentDisposition:`attachment; filename="${filename??'download.bin'}"`,ResponseContentType:'application/octet-stream'}),{expiresIn:ttlSeconds});
       return {method:'GET',url,expiresAt:new Date(Date.now()+ttlSeconds*1000).toISOString()};
     } finally { this.releaseClient(client); }
   }

@@ -70,10 +70,10 @@ export class LifecycleExportService {
         uuid(id); const j = (await this.db.query("SELECT j.* FROM privacy_export_jobs j JOIN users u ON u.id=j.user_id JOIN sessions s ON s.user_id=u.id WHERE j.id=$1 AND j.user_id=$2 AND s.id=$3 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.status='ACTIVE' AND u.privacy_state='ACTIVE'", [id, p.userId, p.sessionId])).rows[0]; if (!j)
         throw new NotFoundException('Export unavailable'); if (j.expires_at <= new Date() || j.state === 'EXPIRED')
         return { ...j, state: 'EXPIRED', manifest: null }; return j; }
-    async result(p: Principal, id: string) { const legacy = (await this.db.query('SELECT state,expires_at FROM privacy_exports WHERE id=$1 AND user_id=$2', [id, p.userId])).rows[0]; if (!legacy)
+    async result(p: Principal, id: string, metadataOnly=false) { uuid(id); const legacy = (await this.db.query('SELECT state,expires_at FROM privacy_exports WHERE id=$1 AND user_id=$2', [id, p.userId])).rows[0]; if (!legacy)
         throw new NotFoundException(); const j = (await this.db.query('SELECT id FROM privacy_export_jobs WHERE id=$1 AND user_id=$2', [id, p.userId])).rows[0]; if (!j)
         return { state: legacy.expires_at <= new Date() ? 'EXPIRED' : legacy.state }; const job = await this.owner(p, id); if (job.state !== 'READY')
-        return { state: job.state }; const chunks = (await this.db.query('SELECT * FROM privacy_export_chunks WHERE export_id=$1 ORDER BY sequence LIMIT 20', [id])).rows; const data: Record<string, any> = { version: 2, rawMediaIncluded: false, partial: Number(job.item_count) > lifecyclePolicy().exportBatch, manifest: job.manifest }; let budget = lifecyclePolicy().exportBatch; for (const chunk of chunks) {
+        return { state: job.state }; if(metadataOnly)return{state:'READY',manifest:job.manifest}; const chunks = (await this.db.query('SELECT * FROM privacy_export_chunks WHERE export_id=$1 ORDER BY sequence LIMIT 20', [id])).rows; const data: Record<string, any> = { version: 2, rawMediaIncluded: false, partial: Number(job.item_count) > lifecyclePolicy().exportBatch, manifest: job.manifest }; let budget = lifecyclePolicy().exportBatch; for (const chunk of chunks) {
         if (budget <= 0)
             break;
         const text = decrypt(chunk.encrypted_payload, 'EXPORT:v2:' + id + ':' + chunk.sequence);
@@ -98,4 +98,10 @@ export class LifecycleExportService {
         throw new ForbiddenException(); const r = (await this.db.query('SELECT * FROM privacy_export_chunks WHERE export_id=$1 AND sequence=$2', [id, sequence])).rows[0]; if (!r || b[4] !== r.sha256)
         throw new ForbiddenException(); const text = decrypt(r.encrypted_payload, 'EXPORT:v2:' + id + ':' + sequence); if (sha(text) !== r.sha256)
         throw new ConflictException('Export integrity unavailable'); return { schemaVersion: 2, category: r.category, sequence, sha256: r.sha256, ndjson: text }; }
+}
+
+// Bound work per worker turn, while avoiding a 15-second process restart for
+// every small/empty category. Each build still has its own transaction and bounds.
+export async function advanceExport(build:()=>Promise<boolean>){
+ for(let step=0;step<4;step++){if(!await build())return false;}return true;
 }

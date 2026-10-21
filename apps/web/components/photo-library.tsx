@@ -4,6 +4,7 @@ import Link from 'next/link';
 import {Asset,bytes,date} from '../lib/control';
 import {useThumbnailCache} from './thumbnail-cache-provider';
 import {ThumbnailLoadError} from '../lib/thumbnail-cache';
+import {originalDownloadPath} from '../lib/media-download';
 import {MediaPreview} from './media-preview';
 export function libraryGroups(items:Asset[]){
  const groups=new Map<string,Asset[]>();
@@ -26,7 +27,7 @@ function Thumbnail({asset}:{asset:Asset}){
  const label=status===404?'Thumbnail not synced yet':status===403?'Preview access restricted':status===409?'Saved preview not ready':status?'Preview temporarily unavailable':'Loading thumbnail';
  return <span ref={ref} className="library-thumbnail">{source?<img src={source} alt="" onError={()=>{setSource('');setStatus(409)}}/>:<span className="library-thumbnail-empty"><span aria-hidden="true">{asset.mediaType==='video'?'▷':'▧'}</span><small>{label}</small></span>}</span>;
 }
-export function PhotoLibrary({items,selecting=false,selected=[],onSelect,busy=false,size=170,onDownload}:{items:Asset[];selecting?:boolean;selected?:string[];onSelect?:(id:string)=>void;busy?:boolean;size?:number;onDownload?:(id:string)=>void}){
+export function PhotoLibrary({items,selecting=false,selected=[],onSelect,busy=false,size=170}:{items:Asset[];selecting?:boolean;selected?:string[];onSelect?:(id:string)=>void;busy?:boolean;size?:number}){
  const[opened,setOpened]=useState<string|null>(null),dialog=useRef<HTMLDialogElement>(null);
  const current=items.find(a=>a.id===opened),index=items.findIndex(a=>a.id===opened);
  useEffect(()=>{const d=dialog.current;if(current&&!d?.open)d?.showModal();else if(!current&&d?.open)d.close()},[current]);
@@ -41,7 +42,7 @@ export function PhotoLibrary({items,selecting=false,selected=[],onSelect,busy=fa
   </button><Link className="library-tile-details" href={`/assets/${a.id}?collection=${a.mediaType==='video'?'videos':'photos'}`} aria-label={`Details for ${a.id.slice(0,8)}`}>Details <span>{bytes(a.sizeBytes)}</span></Link></li>;
  })}</ul></section>)}
  <dialog ref={dialog} className="library-viewer" aria-label="Saved media viewer" onCancel={()=>setOpened(null)} onClose={()=>setOpened(null)} onKeyDown={e=>{if((e.target as HTMLElement).matches('input,select,textarea,video'))return;if(e.key==='ArrowLeft'){e.preventDefault();move(-1)}if(e.key==='ArrowRight'){e.preventDefault();move(1)}}}>
- {current&&<><header><div><strong>{current.mediaType==='video'?'Video':'Photo'}</strong><p>Saved {date(current.protectedAt)} · {index+1} of {items.length}</p></div><button autoFocus className="secondary-button" onClick={()=>setOpened(null)}>Close</button></header><div className="library-viewer-preview"><Thumbnail key={current.id} asset={current}/></div><div className="library-viewer-actions"><button className="secondary-button" disabled={index===0} onClick={()=>move(-1)}>← Previous</button><button className="secondary-button" disabled={index===items.length-1} onClick={()=>move(1)}>Next →</button><Link href={`/assets/${current.id}`}>File details</Link>{onDownload&&<button disabled={busy} onClick={()=>onDownload(current.id)}>Download original</button>}</div><p className="muted">{current.device?.displayName||'Source device unknown'} · {bytes(current.sizeBytes)} · Verified backup</p><details key={current.id}><summary>Load larger saved preview</summary><p>Downloads the saved file, up to 32 MiB. Your original remains unchanged.</p><MediaPreview key={current.id} id={current.id} type={current.mediaType} size={current.sizeBytes} large inline/></details></>}
+ {current&&<><header><div><strong>{current.mediaType==='video'?'Video':'Photo'}</strong><p>Saved {date(current.protectedAt)} · {index+1} of {items.length}</p></div><button autoFocus className="secondary-button" onClick={()=>setOpened(null)}>Close</button></header><div className="library-viewer-preview"><Thumbnail key={current.id} asset={current}/></div><div className="library-viewer-actions"><button className="secondary-button" disabled={index===0} onClick={()=>move(-1)}>← Previous</button><button className="secondary-button" disabled={index===items.length-1} onClick={()=>move(1)}>Next →</button><Link href={`/assets/${current.id}`}>File details</Link><a href={originalDownloadPath(current.id)} target="_blank" rel="noopener" referrerPolicy="same-origin">Download original</a></div><p className="muted">{current.device?.displayName||'Source device unknown'} · {bytes(current.sizeBytes)} · Verified backup</p><details key={current.id}><summary>Load larger saved preview</summary><p>Downloads the saved file, up to 32 MiB. Your original remains unchanged.</p><MediaPreview key={current.id} id={current.id} type={current.mediaType} size={current.sizeBytes} large inline/></details></>}
  </dialog>
  </div>;
 }

@@ -45,3 +45,9 @@ test('connection reuse never skips the private-bucket guard',async()=>{
  const p=provider();await p.getObjectMetadata(key);p.publicBucket=true;await assert.rejects(p.getObjectMetadata(key));
  assert.equal(p.calls.filter(c=>c.constructor.name==='GetBucketAclCommand').length,2);p.onModuleDestroy();
 });
+
+test('download attachment preserves safe format names and rejects header injection',async()=>{
+ const p=provider(),grant=await p.createDownloadAuthorization(key,'version',60,'photo-generated.heic');
+ assert.equal(new URL(grant.url).searchParams.get('response-content-disposition'),'attachment; filename="photo-generated.heic"');
+ for(const name of ['../other','bad\r\nHeader: injected','"inline.html','https://evil.invalid'])await assert.rejects(p.createDownloadAuthorization(key,'version',60,name));p.onModuleDestroy();
+});

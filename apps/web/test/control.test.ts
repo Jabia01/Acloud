@@ -26,4 +26,4 @@ test('ACL014 web cannot mutate manifests or choose resource providers',()=>{for(
 test('ACL014 manifest pagination rejects owner hints and duplicates',()=>{assert.equal(controlRoute('GET',['media-manifests'],'?limit=50'),'/media-manifests?limit=50');assert.equal(controlRoute('GET',['media-manifests'],'?userId=other'),null);assert.equal(controlRoute('GET',['media-manifests'],'?limit=50&limit=100'),null);});
 test('ACL014 resource UUID traversal is rejected',()=>{assert.equal(controlRoute('GET',['media-manifests','../assets',id],''),null);assert.equal(controlRoute('POST',['media-manifests',id,'resources','../private','download'],''),null);});
 
-test('restricted download denial explains the device restriction without claiming bad credentials',async()=>{await assert.rejects(controlRequest('/api/control/assets/'+id+'/download','POST',(async()=>new Response(null,{status:403})) as typeof fetch),/registered iPad/)});
+test('download denial explains account access without claiming bad credentials',async()=>{await assert.rejects(controlRequest('/api/control/assets/'+id+'/download','POST',(async()=>new Response(null,{status:403})) as typeof fetch),/account or session/)});
