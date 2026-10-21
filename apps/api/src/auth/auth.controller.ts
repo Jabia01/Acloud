@@ -25,7 +25,8 @@ export class AuthController {
       password = body.password;
     }
     catch { throw new UnauthorizedException('Invalid credentials'); }
-    return this.auth.login(email, password, input.device(body.device));
+    if(body.signOutOtherSessions!==undefined&&typeof body.signOutOtherSessions!=='boolean')throw new UnauthorizedException('Invalid credentials');
+    return this.auth.login(email, password, input.device(body.device),body.signOutOtherSessions===true);
   }
   @Post('auth/logout') @HttpCode(200) @UseGuards(SessionGuard)
   logout(@Req() request: AuthRequest) { return this.auth.revokeSession(request.principal, request.principal.sessionId, 'LOGOUT'); }

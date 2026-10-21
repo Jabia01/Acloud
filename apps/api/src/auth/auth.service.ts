@@ -60,7 +60,7 @@ export class AuthService {
       VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (user_id,device_identifier) DO UPDATE SET display_name=EXCLUDED.display_name,platform=EXCLUDED.platform,app_version=EXCLUDED.app_version,os_version=EXCLUDED.os_version,last_seen_at=now() RETURNING id`, [randomUUID(), userId, input.identifier, input.displayName, input.platform, input.appVersion, input.osVersion]);
     return result.rows[0].id as string;
   }
-  async login(normalized: string, password: string, device: DeviceInput | null) {
+  async login(normalized: string, password: string, device: DeviceInput | null, signOutOtherSessions=false) {
     const found = await this.db.query('SELECT * FROM users WHERE email_normalized=$1', [normalized]);
     const candidate = found.rows[0];
     const valid = await this.passwords.verify(candidate?.password_hash, password);
@@ -72,6 +72,11 @@ export class AuthService {
       if (!user || user.status !== 'ACTIVE' || user.privacy_state !== 'ACTIVE') throw new UnauthorizedException(INVALID);
       // Reset might have changed the password while expensive verification ran.
       if (user.password_hash !== candidate.password_hash) throw new UnauthorizedException(INVALID);
+      // Explicit password-authenticated recovery; never inferred from a full account.
+      if(signOutOtherSessions){
+        const revoked=await client.query('UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now() RETURNING id',[user.id]);
+        for(const row of revoked.rows)await this.audit(client,user.id,'SESSION_REVOKED',row.id);
+      }
       let deviceId: string | null = null;
       if (device) {
         try { deviceId = await this.upsertDevice(client, user.id, device); }

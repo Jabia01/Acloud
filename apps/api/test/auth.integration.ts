@@ -153,6 +153,26 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
       await get('/me',ipad.body.sessionToken).expect(200);
     }finally{if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved;}
   });
+  test('explicit password-verified recovery signs out only the requested account and frees its slot',async()=>{
+    const otherAddress=`other-${randomUUID()}@example.invalid`;await post('/auth/register',{email:otherAddress,password}).expect(202);
+    const foreign=await post('/auth/login',{email:otherAddress,password}).expect(200),old=await login(randomUUID()).expect(200);
+    const saved=process.env.MAX_ACTIVE_SESSIONS;process.env.MAX_ACTIVE_SESSIONS='1';
+    try{
+      await login().expect(409);await get('/me',old.body.sessionToken).expect(200);
+      await post('/auth/login',{email:address,password:randomUUID(),signOutOtherSessions:true}).expect(401);await get('/me',old.body.sessionToken).expect(200);
+      await post('/auth/login',{email:address,password,signOutOtherSessions:'true'}).expect(401);await get('/me',old.body.sessionToken).expect(200);
+      const replacement=await post('/auth/login',{email:address,password,signOutOtherSessions:true,device:{identifier:randomUUID(),platform:'web',displayName:'Recovered browser'}}).expect(200);
+      await get('/me',old.body.sessionToken).expect(401);await get('/me',replacement.body.sessionToken).expect(200);await get('/me',foreign.body.sessionToken).expect(200);
+      assert.equal((await pool.query("SELECT count(*)::int n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>now()",[userId])).rows[0].n,1);
+      assert.ok((await pool.query("SELECT 1 FROM auth_audit_events WHERE user_id=$1 AND event='SESSION_REVOKED' AND target_id=$2",[userId,old.body.sessionId])).rowCount);
+      await post('/auth/logout',{}).set('Authorization','Bearer '+replacement.body.sessionToken).expect(200);await login().expect(200);
+    }finally{if(saved===undefined)delete process.env.MAX_ACTIVE_SESSIONS;else process.env.MAX_ACTIVE_SESSIONS=saved;}
+  });
+  test('failed device registration rolls back explicit recovery revocations',async()=>{
+    const identifier=randomUUID(),old=await login(identifier).expect(200);
+    await post('/auth/login',{email:address,password,signOutOtherSessions:true,device:{identifier,platform:'web',displayName:'Invalid platform change'}}).expect(401);
+    await get('/me',old.body.sessionToken).expect(200);
+  });
   test('session issuance stores only its hash; /me is authenticated and returns safe fields', async () => {
     await request(app.getHttpServer()).get('/me').expect(401);
     const response = await login().expect(200); const raw = response.body.sessionToken;

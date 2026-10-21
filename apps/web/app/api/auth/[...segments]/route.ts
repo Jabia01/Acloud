@@ -35,7 +35,7 @@ async function handle(request: Request, context: Context) {
       store.set(SESSION_COOKIE, login.sessionToken, cookieOptions(new Date(login.expiresAt)));
       return NextResponse.json(login.body, { headers: { 'Cache-Control': 'no-store' } });
     }
-    if (key === 'logout' || (route.private && upstream.status === 401)) store.set(SESSION_COOKIE, '', { ...cookieOptions(), maxAge: 0 });
+    if ((key === 'logout' && upstream.ok) || (route.private && upstream.status === 401)) store.set(SESSION_COOKIE, '', { ...cookieOptions(), maxAge: 0 });
     return NextResponse.json(data, { status: upstream.status, headers: { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
   } catch {
     return NextResponse.json({ message: 'Service unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
