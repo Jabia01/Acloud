@@ -1,3 +1,4 @@
+import {BetaPolicy} from '../beta/policy';
 import {lifecyclePolicy} from '../lifecycle/policy';
 import {BadRequestException,ConflictException,ForbiddenException,Inject,Injectable,NotFoundException,UnauthorizedException} from '@nestjs/common';
 import {randomBytes,randomUUID,createHash} from 'node:crypto';
@@ -8,6 +9,11 @@ import {LifecycleService} from '../lifecycle/service';import {LifecycleExportSer
 @Injectable() export class PrivacyService {
  constructor(@Inject(DatabaseService)private db:DatabaseService,@Inject(PasswordService)private passwords:PasswordService,@Inject(DurableJobs)private jobs:DurableJobs,@Inject(LifecycleService)private lifecycle:LifecycleService,@Inject(LifecycleExportService)private exports:LifecycleExportService){}
  private async reauthenticate(p:Principal,password:unknown){if(typeof password!=='string'||password.length>4096)throw new UnauthorizedException('Reauthentication required');const user=(await this.db.query("SELECT * FROM users WHERE id=$1 AND status='ACTIVE' AND privacy_state='ACTIVE'",[p.userId])).rows[0];if(!user||!await this.passwords.verify(user.password_hash,password))throw new UnauthorizedException('Reauthentication required');return user;}
+ async deletionAvailability(){
+  const policy=lifecyclePolicy();let enabled=process.env.ACCOUNT_DELETION_ENABLED==='true'&&policy.execution&&(process.env.NODE_ENV!=='production'||policy.approved);
+  if(enabled){try{const beta=new BetaPolicy(this.db);await beta.open('account_deletion');await beta.open('worker_privacy');}catch{enabled=false;}}
+  return{enabled,cooldownSeconds:policy.cooldown};
+ }
  requestDeletion(p:Principal,value:unknown){return this.lifecycle.request(p,value);}
  cancellation(value:unknown,cancel:boolean){return this.lifecycle.capability(value,cancel);}
  async export(p:Principal,value:unknown){const b=body(value,['password']);const verified=await this.reauthenticate(p,b.password);this.exports.ensureAvailable();const id=randomUUID();await this.db.transaction(async c=>{const current=(await c.query('SELECT * FROM users WHERE id=$1 FOR UPDATE',[p.userId])).rows[0];if(!current||current.status!=='ACTIVE'||current.privacy_state!=='ACTIVE'||current.password_hash!==verified.password_hash||!(await c.query('SELECT id FROM sessions WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>now()',[p.sessionId,p.userId])).rowCount)throw new UnauthorizedException();if(Number((await c.query("SELECT count(*) n FROM privacy_exports WHERE user_id=$1 AND state IN('PENDING','READY') AND expires_at>now() AND NOT EXISTS(SELECT 1 FROM privacy_export_jobs j WHERE j.id=privacy_exports.id AND j.user_id=privacy_exports.user_id AND j.state='FAILED')",[p.userId])).rows[0].n)>=3)throw new ConflictException('Export already pending');await c.query("INSERT INTO privacy_exports(id,user_id,expires_at) VALUES($1,$2,now()+$3*interval '1 hour')",[id,p.userId,lifecyclePolicy().exportHours]);await this.jobs.enqueue('PRIVACY_EXPORT',id,{exportId:id,userId:p.userId},c);});return{exportId:id,state:'PENDING'};}

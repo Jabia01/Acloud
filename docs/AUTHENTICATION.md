@@ -88,7 +88,7 @@ auth_audit_events contains account IDs, action, optional target ID and time for
 login, logout, session/device revocation, verification and reset. It stores no
 passwords, raw tokens, mail links or sensitive content. It is an initial audit
 foundation; restricted production roles, immutable audit storage and centralized
-security monitoring remain deferred. No account deletion endpoint exists.
+security monitoring remain deferred. Account deletion now has a reauthenticated, explicitly confirmed lifecycle endpoint; see ACCOUNT_DELETION_AUDIT.md for its gates and validation.
 
 ## Browser and iOS boundaries
 

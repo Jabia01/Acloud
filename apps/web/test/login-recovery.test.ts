@@ -2,7 +2,7 @@ import {test} from 'node:test';import assert from 'node:assert/strict';
 import {loginDestination,loginRecoveryFields,browserDeviceIdentifier} from '../lib/login-recovery';
 import {LibrarySnapshots} from '../lib/library-snapshot';
 test('checkout return destinations remain local, allowlisted and strip untrusted query parameters',()=>{
- for(const path of ['/billing/success','/billing/cancel','/sessions','/photos'])assert.equal(loginDestination(path),path);
+ for(const path of ['/billing/success','/billing/cancel','/account/delete','/sessions','/photos'])assert.equal(loginDestination(path),path);
  for(const path of ['https://evil.invalid','//evil.invalid','/billing/success?redirect=evil','/admin',null])assert.equal(loginDestination(path),'/dashboard');
  assert.equal(loginRecoveryFields(409,'login'),true);assert.equal(loginRecoveryFields(401,'login'),false);assert.equal(loginRecoveryFields(409,'register'),false);
 });

@@ -9,6 +9,7 @@ import {UploadModule} from '../uploads/upload.module';import {PrivacyService} fr
 @Controller('privacy') @UseInterceptors(AuthNoStore)
 export class PrivacyController{
  constructor(@Inject(PrivacyService)private privacy:PrivacyService,@Inject(LifecycleExportService)private exports:LifecycleExportService){}
+ @Get('deletion/availability') @UseGuards(SessionGuard)availability(){return this.privacy.deletionAvailability();}
  @Post('deletion') @HttpCode(202) @UseGuards(SessionGuard)request(@Req()r:AuthRequest,@Body()b:unknown){return this.privacy.requestDeletion(r.principal,b);}
  @Post('deletion/cancel') @HttpCode(200)cancel(@Body()b:unknown){return this.privacy.cancellation(b,true);}
  @Post('deletion/status') @HttpCode(200)status(@Body()b:unknown){return this.privacy.cancellation(b,false);}

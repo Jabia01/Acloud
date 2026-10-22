@@ -13,7 +13,7 @@ Updated 12 October 2026. Native engineering preparation is recorded in [IOS_PRIV
 | Data collection manifest | Nine app-functionality categories declared as linked and not tracking; source rationale documented. | Final operator/provider review and Apple privacy report. |
 | Payments | No native payment implementation; staged payments remain gated. | Revisit declarations if enabled later. |
 | Privacy notice | Concrete draft prepared with unresolved fields visibly marked. | Operator/legal identity, contact, notice URL, retention and provider/transfer review. |
-| Deletion/export | Engineering lifecycle exists, but hosted gated behavior and retention are not an immediate-deletion promise. | Accepted procedures, support handling and approved retained-copy periods. |
+| Deletion/export | Engineering lifecycle exists; 22 October audit added a direct app entry, gated website deletion page and durable renewal cancellation. See [ACCOUNT_DELETION_AUDIT.md](ACCOUNT_DELETION_AUDIT.md). Hosted deletion remains gated. | Authorized publication, retention/support acceptance, disposable hosted deletion and provider-cancellation drill, physical navigation check and final distribution review. |
 | Distribution | Paid membership absent; no upload or privacy answers submitted. | Membership, owned identity/signing, final archive validation and TestFlight acceptance. |
 
 Follow [Apple app privacy details](https://developer.apple.com/app-store/app-privacy-details/). Verify the actual signed Release artifact and full service inventory before answering the portal. Do not copy placeholders into a public notice or mark legal/retention acceptance complete from a build.

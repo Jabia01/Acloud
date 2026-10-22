@@ -8,6 +8,8 @@ import type {INestApplication} from '@nestjs/common';
 import request from 'supertest';
 import {AppModule} from '../src/app.module';
 import {BillingProvider,PaystackBillingProvider,type Price,type VerifiedPayment,type ProviderSubscription} from '../src/billing/provider';
+import {LifecycleService} from '../src/lifecycle/service';
+import {PasswordService} from '../src/auth/password.service';
 import {BillingService} from '../src/billing/service';
 import {ownerTestBinding} from '../src/beta/owner-test';
 import {periodEnd} from '../src/billing/entitlement';
@@ -23,7 +25,7 @@ class MockBilling extends BillingProvider{
  async initializeCheckout(_email:string,reference:string){if(this.outage)throw new Error();return `https://checkout.paystack.com/${reference}`;}
  async verifyTransaction(ref:string){if(this.outage||!this.payments.has(ref))throw new Error();return this.payments.get(ref)!;}
  async createSubscription(customer:string,p:Price,start:Date){const old=[...this.subs.values()].find(s=>s.customerCode===customer&&s.planCode===p.provider_plan_code&&s.status==='active');if(old)return old;const code=`SUB_${customer}_${randomUUID()}`,s={code,customerCode:customer,planCode:p.provider_plan_code,status:'active',nextPaymentDate:start.toISOString()};this.subs.set(code,s);return s;}
- async cancelSubscription(code:string){this.subs.get(code)!.status='non-renewing';}async fetchSubscription(code:string){return this.subs.get(code)!;}
+ async cancelSubscription(code:string){if(this.outage)throw new Error('Generated provider outage');this.subs.get(code)!.status='non-renewing';}async fetchSubscription(code:string){return this.subs.get(code)!;}
  validateWebhookSignature(raw:Buffer,s:string){return this.signature.validateWebhookSignature(raw,s);}
 }
 describe('billing authority: PostgreSQL and deterministic provider',{concurrency:false},()=>{
@@ -40,6 +42,22 @@ describe('billing authority: PostgreSQL and deterministic provider',{concurrency
  async function paid(code='STANDARD_64',interval='MONTHLY'){const co=await checkout(code,interval);await evidence(co);assert.equal((await hook('charge.success',{reference:co.provider_reference})).status,200);return co;}
  const current=async()=> (await get('/billing/subscription').expect(200)).body;
  async function staff(role:string){const id=randomUUID(),t=randomBytes(32).toString('base64url');await pool.query("INSERT INTO internal_admins(id,email,email_normalized,password_hash,role) VALUES($1,$2,$2,'generated-unused',$3)",[id,`${id}@example.invalid`,role]);await pool.query("INSERT INTO internal_admin_sessions(id,admin_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '15 minutes')",[randomUUID(),id,digest(t)]);return t;}
+ test('deletion availability requires authentication and does not submit deletion',async()=>{await get('/privacy/deletion/availability','invalid').expect(401);const result=await get('/privacy/deletion/availability').expect(200);assert.equal(result.body.enabled,false);assert.equal(typeof result.body.cooldownSeconds,'number');assert.equal((await pool.query('SELECT count(*)::int n FROM deletion_requests WHERE user_id=$1',[user])).rows[0].n,0);});
+ test('cancelling deletion before its worker runs still cancels provider renewal through durable billing work',async()=>{
+  const previous={...process.env},password=randomUUID().repeat(2);
+  try{
+   await paid();await service.reconcile(user,true);const subscription=(await pool.query('SELECT provider_subscription_id FROM subscriptions WHERE user_id=$1',[user])).rows[0].provider_subscription_id;assert.ok(subscription);assert.equal(provider.subs.get(subscription)!.status,'active');
+   process.env.ACCOUNT_DELETION_ENABLED='true';process.env.MFA_ENCRYPTION_KEY=randomBytes(32).toString('hex');
+   await pool.query('UPDATE users SET password_hash=$2 WHERE id=$1',[user,await app.get(PasswordService).hash(password)]);
+   const lifecycle=app.get(LifecycleService),result=await lifecycle.request({userId:user,sessionId:session},{password,confirmation:'DELETE MY ACCOUNT',idempotencyKey:randomUUID()});
+   const jobs=async()=> (await pool.query('SELECT status FROM billing_provider_jobs WHERE user_id=$1 AND subscription_code=$2',[user,subscription])).rows;
+   assert.deepEqual(await jobs(),[{status:'PENDING'}]);await lifecycle.capability({requestId:result.requestId,cancellationToken:result.cancellationToken},true);
+   assert.deepEqual(await jobs(),[{status:'PENDING'}]);assert.equal(provider.subs.get(subscription)!.status,'active');
+   provider.outage=true;assert.equal((await service.reconcile(user,true)).failed,1);assert.deepEqual(await jobs(),[{status:'PENDING'}]);provider.outage=false;
+   assert.equal((await service.reconcile(user,true)).failed,0);assert.deepEqual(await jobs(),[{status:'DONE'}]);assert.equal(provider.subs.get(subscription)!.status,'non-renewing');
+   await service.reconcile(user,true);assert.equal((await jobs()).length,1);assert.equal((await pool.query('SELECT state FROM deletion_requests WHERE id=$1',[result.requestId])).rows[0].state,'CANCELLED');assert.equal((await pool.query('SELECT status FROM users WHERE id=$1',[user])).rows[0].status,'ACTIVE');
+  }finally{provider.outage=false;for(const key of Object.keys(process.env))if(!(key in previous))delete process.env[key];Object.assign(process.env,previous);}
+ });
  test('private TEST profile restricts checkout to the verified owner browser and settles a signed payment once',async()=>{
   const previous={...process.env},device=randomUUID(),foreign=randomUUID(),foreignDevice=randomUUID(),foreignToken=randomBytes(32).toString('base64url');
   try{

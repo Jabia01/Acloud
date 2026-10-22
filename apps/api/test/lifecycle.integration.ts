@@ -1,3 +1,4 @@
+import {PrivacyService} from '../src/hardening/privacy';
 import {openMail} from '../src/hardening/email';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -163,4 +164,17 @@ test('export job failures release request state only after terminal failure and 
 test('exhausted worker lease marks its export failed',async()=>{
  const p=await account(),id=randomUUID(),jobs=new DurableJobs(db);await pool.query("INSERT INTO privacy_exports(id,user_id,expires_at) VALUES($1,$2,now()+interval '1 day')",[id,p.userId]);await pool.query('INSERT INTO privacy_export_jobs(id,user_id,expires_at) SELECT id,user_id,expires_at FROM privacy_exports WHERE id=$1',[id]);
  const jobId=await jobs.enqueue('PRIVACY_EXPORT',id,{userId:p.userId,exportId:id});await pool.query("UPDATE durable_jobs SET state='RUNNING',attempts=max_attempts,lease_id=$2,lease_until=now()-interval '1 second' WHERE id=$1",[jobId,randomUUID()]);await jobs.claim();assert.equal((await pool.query('SELECT state FROM privacy_export_jobs WHERE id=$1',[id])).rows[0].state,'FAILED');
+});
+
+test('deletion availability follows execution and privacy pause gates without creating a request',async()=>{
+ const prior={...process.env},privacy=new PrivacyService(db,passwords,new DurableJobs(db),service,exportsService),p=await account();
+ try{
+  process.env.ACCOUNT_DELETION_EXECUTION_ENABLED='false';assert.equal((await privacy.deletionAvailability()).enabled,false);
+  process.env.ACCOUNT_DELETION_EXECUTION_ENABLED='true';assert.equal((await privacy.deletionAvailability()).enabled,true);
+  process.env.NODE_ENV='production';process.env.APP_ENV='staging';process.env.PRIVACY_RETENTION_APPROVED='true';process.env.DELETION_COOLDOWN_SECONDS='86400';
+  await pool.query("UPDATE beta_switches SET blocked=false WHERE name IN('account_deletion','worker_privacy')");assert.equal((await privacy.deletionAvailability()).enabled,true);
+  for(const name of ['account_deletion','worker_privacy']){await pool.query('UPDATE beta_switches SET blocked=true WHERE name=$1',[name]);assert.equal((await privacy.deletionAvailability()).enabled,false);await pool.query('UPDATE beta_switches SET blocked=false WHERE name=$1',[name]);}
+  assert.equal((await pool.query('SELECT count(*)::int n FROM deletion_requests WHERE user_id=$1',[p.userId])).rows[0].n,0);
+  assert.equal((await pool.query('SELECT status FROM users WHERE id=$1',[p.userId])).rows[0].status,'ACTIVE');
+ }finally{for(const key of Object.keys(process.env))if(!(key in prior))delete process.env[key];Object.assign(process.env,prior);}
 });

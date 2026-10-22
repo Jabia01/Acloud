@@ -67,6 +67,10 @@ struct AccountView: View {
                     .disabled(busy || model.refreshing)
             }
             TransferNotificationSettings()
+            Section("Account privacy") {
+                Link("Delete account",destination:URL(string:"https://staging.useacloud.com/account/delete")!)
+                Text("Review deletion and its cancellation window on the Acloud website. You may need to sign in there. Your device Photos are not deleted.").font(.footnote).foregroundStyle(.secondary)
+            }
             Section("Help") {
                 Link("Contact support", destination: URL(string:"mailto:Support247.acloud@useacloud.com")!)
                 Link("Privacy requests", destination: URL(string:"mailto:Privacy247.acloud@useacloud.com")!)

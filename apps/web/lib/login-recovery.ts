@@ -1,4 +1,4 @@
-const destinations=new Set(['/dashboard','/photos','/videos','/account','/sessions','/devices','/billing','/billing/success','/billing/cancel','/billing/history']);
+const destinations=new Set(['/dashboard','/photos','/videos','/account','/account/delete','/sessions','/devices','/billing','/billing/success','/billing/cancel','/billing/history']);
 export function loginDestination(value:string|null){return value&&destinations.has(value)?value:'/dashboard';}
 export function loginRecoveryFields(status:number,mode:string){return mode==='login'&&status===409;}
 export function browserDeviceIdentifier(storage:Pick<Storage,'getItem'|'setItem'>,create=()=>crypto.randomUUID()){

@@ -1,4 +1,4 @@
-import {test} from 'node:test';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {privacyRoute,publicPrivacyResult} from '../lib/privacy';import {adminRoute} from '../lib/admin';import {validateWebConfiguration} from '../lib/production-config';
+import {test} from 'node:test';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {privacyRoute,publicPrivacyResult,privacyFailureClearsSession} from '../lib/privacy';import {adminRoute} from '../lib/admin';import {validateWebConfiguration} from '../lib/production-config';
 test('privacy routes allow only owner workflows',()=>{assert.equal(privacyRoute('POST',['deletion']),'/privacy/deletion');assert.ok(privacyRoute('GET',['exports',randomUUID()]));for(const p of [['..','export'],['exports','../other'],['objects','delete'],['exports','https://evil.invalid']])assert.equal(privacyRoute('GET',p),null);});
 test('privacy response omits upstream secrets',()=>{const r=publicPrivacyResult('deletion',{requestId:randomUUID(),state:'COOLDOWN',token_hash:'private',storage_object_key:'private'});assert.ok(!JSON.stringify(r).includes('private'));});
 test('staff challenge explicitly allowlisted and query rejected',()=>{assert.equal(adminRoute('POST',['auth','challenge'],''),'/internal/auth/challenge');assert.equal(adminRoute('POST',['auth','challenge'],'?origin=evil'),null);assert.ok(adminRoute('GET',['operations','metrics'],''));});
@@ -19,3 +19,11 @@ test('manifest-only polling is allowlisted and never projects account rows',()=>
  assert.equal(privacyRoute('POST',['exports',id,'manifest']),null);
  assert.ok(!JSON.stringify(publicPrivacyResult(`exports/${id}/manifest`,{state:'READY',manifest:{schemaVersion:2},data:{account:'PRIVATE'}})).includes('PRIVATE'));
 });
+
+test('deletion availability has one authenticated read route and a strictly bounded public projection',()=>{
+ assert.equal(privacyRoute('GET',['deletion','availability']),'/privacy/deletion/availability');assert.equal(privacyRoute('POST',['deletion','availability']),null);
+ assert.deepEqual(publicPrivacyResult('deletion/availability',{enabled:false,cooldownSeconds:604800,key:'PRIVATE'}),{enabled:false,cooldownSeconds:604800});
+ for(const value of [{enabled:'true',cooldownSeconds:604800},{enabled:true,cooldownSeconds:-1},{enabled:true,cooldownSeconds:Infinity},{enabled:true,cooldownSeconds:2592001}])assert.equal(publicPrivacyResult('deletion/availability',value),null);
+});
+
+test('failed deletion reauthentication or public cancellation never clears an unrelated session',()=>{for(const path of ['deletion','deletion/cancel','deletion/status','export'])assert.equal(privacyFailureClearsSession('POST',path),false);assert.equal(privacyFailureClearsSession('GET','deletion/availability'),true);assert.equal(privacyFailureClearsSession('GET','exports/'+randomUUID()),true);});
