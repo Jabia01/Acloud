@@ -9,6 +9,7 @@ final class MemoryTokenStore: SessionTokenStore {
     func clear() throws { value = nil }
 }
 final class AuthProtocol: URLProtocol {
+    static var beforeResponse:(()->Void)?
     static var body = ""
     static var status = 200
     static var authorization: String?
@@ -18,6 +19,7 @@ final class AuthProtocol: URLProtocol {
     override func startLoading() {
         Self.path = request.url?.path
         Self.authorization = request.value(forHTTPHeaderField: "Authorization")
+        let callback=Self.beforeResponse;Self.beforeResponse=nil;callback?()
         let response = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(Self.body.utf8))
@@ -30,6 +32,7 @@ final class AuthAPITests: XCTestCase {
     private var store: MemoryTokenStore!
     private var api: AuthAPI!
     override func setUp() {
+        AuthProtocol.beforeResponse=nil
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AuthProtocol.self]
         session = URLSession(configuration: config); store = MemoryTokenStore()
@@ -91,6 +94,22 @@ final class AuthAPITests: XCTestCase {
     func testUnauthorizedClearsStore() async {
         store.value = String(repeating: "z", count: 43); AuthProtocol.status = 401
         do { _ = try await api.me(); XCTFail("Expected unauthorized") } catch { XCTAssertNil(store.value) }
+    }
+    func testLateUnauthorizedResponseDoesNotClearANewerSignIn()async throws {
+        let old=String(repeating:"a",count:43),fresh=String(repeating:"b",count:43);store.value=old;AuthProtocol.status=401
+        AuthProtocol.beforeResponse={self.store.value=fresh}
+        do{_=try await api.me();XCTFail("Expected expired session")}catch{XCTAssertEqual(error as? AccountAPIError,.unauthorized)}
+        XCTAssertEqual(AuthProtocol.authorization,"Bearer \(old)");XCTAssertEqual(store.value,fresh)
+    }
+    func testLateLogoutResponseDoesNotClearANewerSignIn()async throws {
+        let old=String(repeating:"a",count:43),fresh=String(repeating:"b",count:43);store.value=old
+        AuthProtocol.beforeResponse={self.store.value=fresh};try await api.logout()
+        XCTAssertEqual(AuthProtocol.authorization,"Bearer \(old)");XCTAssertEqual(store.value,fresh)
+    }
+    func testKeychainConditionalClearPreservesReplacementCredential()throws {
+        let keychain=KeychainSessionStore(service:"recovery.test.\(UUID().uuidString)");defer{try? keychain.clear()}
+        try keychain.save("old");try keychain.save("new");try keychain.clear(ifMatching:"old");XCTAssertEqual(try keychain.read(),"new")
+        try keychain.clear(ifMatching:"new");XCTAssertNil(try keychain.read())
     }
     func testLogoutRevokesThenClears() async throws {
         store.value = String(repeating: "z", count: 43); try await api.logout(); XCTAssertNil(store.value)

@@ -86,7 +86,7 @@ struct AccountView: View {
             }
             if !message.isEmpty { Text(message).accessibilityLabel(message) }
         }.acloudCanvas()
-        .task { await model.refresh() }
+        .task { await model.refresh(force: BackupQueueModel.shared.needsSignIn) }
         .refreshable { await model.refresh(force: true) }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await model.refresh() } }

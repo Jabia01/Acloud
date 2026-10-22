@@ -244,6 +244,17 @@ describe('real PostgreSQL account security', { concurrency: false }, () => {
     await get('/me', first.body.sessionToken).expect(401); await get('/me', second.body.sessionToken).expect(401);
     await login().expect(401); password = replacement; await login().expect(200);
   });
+  test('password reset preserves pending upload IDs, accepted parts and cloud reservations for the same account',async()=>{
+    const identifier=randomUUID(),first=await login(identifier).expect(200),device=(await pool.query('SELECT id FROM devices WHERE user_id=$1 AND device_identifier=$2',[userId,identifier])).rows[0].id;
+    const asset=randomUUID(),upload=randomUUID(),key=randomUUID(),checksum='a'.repeat(64);
+    await pool.query("INSERT INTO assets(id,user_id,device_id,media_type,expected_size_bytes,expected_checksum,storage_object_key,status) VALUES($1,$2,$3,'test',100,$4,$5,'UPLOADING')",[asset,userId,device,checksum,'generated/'+asset]);
+    await pool.query("INSERT INTO upload_sessions(id,user_id,asset_id,idempotency_key,request_hash,status,expected_size_bytes,expected_checksum,expires_at,transfer_mode,part_size_bytes,multipart_upload_id) VALUES($1,$2,$3,$4,$5,'UPLOADING',100,$5,now()+interval '1 day','multipart',5242880,'generated-multipart')",[upload,userId,asset,key,checksum]);
+    await pool.query("INSERT INTO upload_parts(upload_session_id,part_number,expected_size_bytes,expected_checksum,storage_etag,completed_at) VALUES($1,1,100,$2,'generated-etag',now())",[upload,checksum]);
+    await pool.query('INSERT INTO development_entitlements(user_id,quota_bytes,reserved_bytes) VALUES($1,5000000000,100) ON CONFLICT(user_id) DO UPDATE SET reserved_bytes=100',[userId]);
+    const snapshot=async()=>({session:(await pool.query('SELECT id,asset_id,idempotency_key,status,multipart_upload_id FROM upload_sessions WHERE id=$1',[upload])).rows[0],part:(await pool.query('SELECT part_number,storage_etag,completed_at FROM upload_parts WHERE upload_session_id=$1',[upload])).rows[0],reserved:(await pool.query('SELECT reserved_bytes FROM development_entitlements WHERE user_id=$1',[userId])).rows[0].reserved_bytes});
+    const before=await snapshot();await post('/auth/password/forgot',{email:address}).expect(202);const raw=message('reset').token,replacement=randomUUID().repeat(2);await post('/auth/password/reset',{token:raw,password:replacement}).expect(200);
+    await get('/me',first.body.sessionToken).expect(401);password=replacement;const renewed=await login(identifier).expect(200);await get('/me',renewed.body.sessionToken).expect(200);assert.deepEqual(await snapshot(),before);assert.equal((await pool.query('SELECT revoked_at FROM devices WHERE id=$1',[device])).rows[0].revoked_at,null);
+  });
   test('concurrent password reset cannot replay or double-consume a token', async () => {
     await post('/auth/password/forgot', { email: address }).expect(202); const raw = message('reset').token;
     const responses = await Promise.all([post('/auth/password/reset', { token: raw, password: randomUUID() }), post('/auth/password/reset', { token: raw, password: randomUUID() })]);

@@ -1,4 +1,5 @@
 'use client';
+import {signInPath} from '../lib/login-recovery';
 import React,{useEffect,useRef,useState} from 'react';
 import Link from 'next/link';
 import {Asset,bytes,date} from '../lib/control';
@@ -18,7 +19,7 @@ function Thumbnail({asset}:{asset:Asset}){
  useEffect(()=>{
   let url='',started=false,disposed=false;setSource('');setStatus(0);
   const observer=new IntersectionObserver(entries=>{if(!entries.some(e=>e.isIntersecting)||started)return;started=true;observer.disconnect();
-   void(async()=>{try{if(!cache)throw new ThumbnailLoadError(503);const blob=await cache.load(asset.id+':'+(asset.thumbnailKey||'pending'),asset.id);if(disposed)return;url=URL.createObjectURL(blob);setSource(url)}catch(e){if(!disposed){const code=e instanceof ThumbnailLoadError?e.status:503;if(code===401){window.location.replace('/login');return}setStatus(code)}}})();
+   void(async()=>{try{if(!cache)throw new ThumbnailLoadError(503);const blob=await cache.load(asset.id+':'+(asset.thumbnailKey||'pending'),asset.id);if(disposed)return;url=URL.createObjectURL(blob);setSource(url)}catch(e){if(!disposed){const code=e instanceof ThumbnailLoadError?e.status:503;if(code===401){window.location.replace(signInPath(window.location.pathname));return}setStatus(code)}}})();
   },{rootMargin:'120px'});
   if(ref.current)observer.observe(ref.current);
   return()=>{disposed=true;observer.disconnect();if(url)URL.revokeObjectURL(url)};

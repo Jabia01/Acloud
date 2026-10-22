@@ -73,7 +73,7 @@ public final class PartURLSessionTransport:NSObject,PartTransport,URLSessionTask
   lock.lock();let c=pending.removeValue(forKey:task.taskIdentifier);lock.unlock();guard let c else{return}
   if let error{c.resume(throwing:error);return}
   guard let http=task.response as? HTTPURLResponse else{c.resume(throwing:BackupFailure.http(503));return}
-  if (200..<300).contains(http.statusCode){c.resume()}else{c.resume(throwing:http.statusCode==403 ? BackupFailure.authorization : BackupFailure.http(http.statusCode))}
+  if (200..<300).contains(http.statusCode){c.resume()}else{c.resume(throwing:[401,403].contains(http.statusCode) ? BackupFailure.authorization : BackupFailure.http(http.statusCode))}
  }
  public func urlSession(_ session:URLSession,task:URLSessionTask,willPerformHTTPRedirection response:HTTPURLResponse,newRequest request:URLRequest,completionHandler:@escaping(URLRequest?)->Void){completionHandler(nil)}
  public func urlSessionDidFinishEvents(forBackgroundURLSession session:URLSession){lock.lock();let h=finishHandler;finishHandler=nil;lock.unlock();DispatchQueue.main.async{h?()}}

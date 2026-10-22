@@ -5,11 +5,17 @@ public protocol SessionTokenStore {
     func read() throws -> String?
     func save(_ token: String) throws
     func clear() throws
+    func clear(ifMatching token:String) throws
+}
+
+public extension SessionTokenStore {
+    func clear(ifMatching token:String) throws {if try read()==token{try clear()}}
 }
 
 public enum SecureStorageError: Error { case unavailable }
 
 public final class KeychainSessionStore: SessionTokenStore {
+    private static let credentialLock=NSRecursiveLock()
     private let service: String
     private let account = "server-session"
     private let allowsBackgroundAccess:Bool
@@ -21,6 +27,7 @@ public final class KeychainSessionStore: SessionTokenStore {
          kSecAttrSynchronizable as String: false]
     }
     public func read() throws -> String? {
+        Self.credentialLock.lock();defer{Self.credentialLock.unlock()}
         var query = self.query
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -36,6 +43,7 @@ public final class KeychainSessionStore: SessionTokenStore {
         return token
     }
     public func save(_ token: String) throws {
+        Self.credentialLock.lock();defer{Self.credentialLock.unlock()}
         let attributes: [String: Any] = [kSecValueData as String: Data(token.utf8),
             kSecAttrAccessible as String: accessibility]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
@@ -45,7 +53,12 @@ public final class KeychainSessionStore: SessionTokenStore {
             guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw SecureStorageError.unavailable }
         } else if status != errSecSuccess { throw SecureStorageError.unavailable }
     }
+    public func clear(ifMatching token:String) throws {
+        Self.credentialLock.lock();defer{Self.credentialLock.unlock()}
+        if try read()==token{try clear()}
+    }
     public func clear() throws {
+        Self.credentialLock.lock();defer{Self.credentialLock.unlock()}
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw SecureStorageError.unavailable }
     }

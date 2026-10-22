@@ -1,4 +1,5 @@
 'use client';
+import {signInPath} from '../lib/login-recovery';
 import {BetaAccount} from './beta-account';
 import {BillingSummary} from './billing';
 import {PhotoLibrary} from './photo-library';
@@ -26,7 +27,7 @@ export function ControlPlane({view,id}:{view:View;id?:string}) {
  useEffect(()=>{setSelected(s=>s.filter(id=>inventory.items.some(a=>a.id===id)));setDownloadIds(s=>s.filter(id=>inventory.items.some(a=>a.id===id)))},[inventory]);
  const media=view==='photos' ? 'image' : view==='videos' ? 'video' : null;
  const inventoryPath=(cursor?:string)=>`/api/control/assets?limit=30${media ? `&mediaType=${media}` : ''}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
- function fail(e:unknown) { if(e instanceof SessionExpired) { snapshots?.clear(); window.location.replace('/login'); return; } setError(e instanceof Error ? e.message : 'Service unavailable. Please try again.'); }
+ function fail(e:unknown) { if(e instanceof SessionExpired) { snapshots?.clear(); window.location.replace(signInPath(window.location.pathname)); return; } setError(e instanceof Error ? e.message : 'Service unavailable. Please try again.'); }
  useEffect(()=>{const update=()=>setOffline(!navigator.onLine),online=()=>{update();setRevision(n=>n+1)};update();window.addEventListener('offline',update);window.addEventListener('online',online);return()=>{window.removeEventListener('offline',update);window.removeEventListener('online',online)}},[]);
  useEffect(()=>{ let active=true;const saved=snapshots?.get(viewKey);if(saved){setInventory(saved.inventory);setReadyView(viewKey);setUpdated(new Date(saved.updated))}  setLoading(true);setError('');if(readyView!==viewKey){setSelected([]);setDownloadIds([]);setSelecting(false);setSearch('')}
   async function load() { try {

@@ -10,20 +10,22 @@ private func asset(_ id:UUID,status:String,size:Int) throws -> ServerAsset {
 }
 private actor TestAPI:MultipartAPI {
  let id=UUID(),assetID=UUID();var phase:RemoteAssetStatus = .queued;var size=0;var accepted:[CompletedPart]=[]
- var createError:BackupFailure?;var creates=0;var completed=false;var verificationUnavailable=false;var cancelled=false;var authorizations=0;var cancellationUnavailable=false
- func create(_ item:BackupItem) throws -> MultipartSession {creates+=1;if let createError{throw createError};size=item.expectedSizeBytes!;return response()}
+ var createdKeys:[UUID]=[];var rejectedPart:Int?;var createError:BackupFailure?;var creates=0;var completed=false;var verificationUnavailable=false;var cancelled=false;var authorizations=0;var cancellationUnavailable=false
+ func create(_ item:BackupItem) throws -> MultipartSession {creates+=1;createdKeys.append(item.uploadKey);if let createError{throw createError};size=item.expectedSizeBytes!;return response()}
  func response() -> MultipartSession {MultipartSession(id:id,assetId:assetID,status:phase,partSizeBytes:5*1024*1024)}
  func status(_ id:UUID) -> MultipartSession{response()}
  func start(_ id:UUID) -> MultipartSession{phase = .uploading;return response()}
  func parts(_ id:UUID) -> PartListing{PartListing(completed:completed,parts:accepted)}
  func authorize(_ id:UUID,number:Int,size:Int,checksum:String) throws -> UploadAuthorization {
   authorizations+=1
+  if rejectedPart==number{throw BackupFailure.http(401)}
   return try JSONDecoder().decode(UploadAuthorization.self,from:JSONSerialization.data(withJSONObject:["method":"PUT","url":"https://storage.example.invalid/part","headers":["content-length":String(size)],"expiresAt":"2099-01-01T00:00:00.000Z"]))
  }
  func complete(_ id:UUID) -> MultipartSession{completed=true;phase = .uploaded;return response()}
  func verify(_ id:UUID) throws -> MultipartSession{if verificationUnavailable{throw BackupFailure.http(503)};phase = .protected;return response()}
  func asset(_ id:UUID) throws -> ServerAsset{try BackupEngineTests.remote(assetID,status:phase.rawValue,size:size)}
  func cancel(_ id:UUID)throws{if cancellationUnavailable{throw BackupFailure.http(503)};cancelled=true;phase = .cancelled}
+ func expireSignIn(onPart part:Int?){rejectedPart=part}
  func failCreate(_ error:BackupFailure?){createError=error}
  func failCancellation(_ value:Bool){cancellationUnavailable=value}
  func accept(_ number:Int,size:Int){accepted.removeAll{$0.partNumber==number};accepted.append(CompletedPart(partNumber:number,sizeBytes:size))}
@@ -79,6 +81,18 @@ final class BackupEngineTests:XCTestCase {
   _=try await queue.enqueue(item)
   let engine=BackupCoordinator(queue:queue,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:source,files:files),files:files,partConcurrency:partConcurrency,onProtected:onProtected)
   try await engine.setNetwork(NetworkSnapshot());return(queue,engine,api,transport,item,files,d)
+ }
+ func testExpiredSignInPreservesPersistedUploadAndPartsForReauthentication()async throws {
+  let(q,e,api,t,item,_,d)=try await fixture(bytes:6*1024*1024);await api.expireSignIn(onPart:2)
+  do{try await e.run(item.id);XCTFail("Expected sign-in expiry")}catch{XCTAssertEqual(error as? BackupFailure,.http(401))}
+  let paused=try await q.read(item.id),parts=try await q.parts(item.id)
+  XCTAssertEqual(paused?.state,.paused);XCTAssertEqual(paused?.lastErrorCode,"AUTHENTICATION_REQUIRED");XCTAssertEqual(paused?.retryCount,0);XCTAssertNil(paused?.nextRetryAt);XCTAssertEqual(parts.count,1)
+  XCTAssertNotNil(paused?.sessionID);XCTAssertNotNil(paused?.assetID);XCTAssertEqual(paused?.uploadKey,item.uploadKey)
+  let reopened=try SQLiteBackupQueue(url:d.appendingPathComponent("queue.sqlite")),persisted=try await reopened.read(item.id)
+  XCTAssertEqual(persisted?.sessionID,paused?.sessionID);XCTAssertEqual(persisted?.uploadKey,item.uploadKey)
+  await api.expireSignIn(onPart:nil);try await e.resume(item.id);try await e.run(item.id)
+  let done=try await q.read(item.id),created=await api.creates,keys=await api.createdKeys,numbers=await t.numbers
+  XCTAssertEqual(done?.state,.protected);XCTAssertEqual(done?.sessionID,paused?.sessionID);XCTAssertEqual(done?.uploadKey,item.uploadKey);XCTAssertEqual(created,2);XCTAssertEqual(keys,[item.uploadKey,item.uploadKey]);XCTAssertEqual(numbers,[1,2])
  }
  func testNoDeviceSpacePausesBeforePreparingOrCreatingServerReservation()async throws {
   let(q,_,api,t,item,files,d)=try await fixture(bytes:100)
@@ -274,7 +288,7 @@ final class BackupEngineTests:XCTestCase {
   let reopened=try SQLiteBackupQueue(url:d.appendingPathComponent("queue.sqlite"))
   let next=BackupCoordinator(queue:reopened,api:api,transport:t,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files)
   try await next.setNetwork(NetworkSnapshot());try await next.reconcileStartup();try await next.retryFailed(item.id);try await next.run(item.id)
-  let result=try await reopened.read(item.id);let parts=await t.numbers;XCTAssertEqual(result?.state,.protected);XCTAssertEqual(parts,[1,2,2,3])
+  let result=try await reopened.read(item.id);let parts=await t.numbers;XCTAssertEqual(result?.state,.protected);XCTAssertEqual(parts.sorted(),[1,2,2,3])
  }
  func testCrashBeforeLocalPartCommitReconcilesStorage() async throws {
   let(q,e,_,t,item,_,_)=try await fixture();await t.configure(fail:2,lose:true)

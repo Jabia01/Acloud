@@ -26,7 +26,8 @@ private extension BackupState {
 private func backupGuidance(_ item:BackupItem)->String? {
  if item.lastErrorCode == "NETWORK_POLICY" {return "Waiting for an allowed connection. Backup resumes automatically when Wi-Fi returns and Low Data Mode allows transfers."}
  if item.lastErrorCode == "WAITING_FOR_ICLOUD_ORIGINAL" { return "This original is in iCloud. Allow downloads over Wi-Fi, then resume. Your original stays in Photos." }
- if item.lastErrorCode == "SESSION_EXPIRED" { return "Sign in again from Account, then retry this backup." }
+ if ["AUTHENTICATION_REQUIRED","HTTP_401"].contains(item.lastErrorCode ?? "") { return "Sign in again from Account, then resume this backup. Your queued items and saved progress are kept." }
+ if item.lastErrorCode == "SESSION_EXPIRED" { return "The upload window expired. Retry this backup to start a new upload attempt." }
  if item.lastErrorCode == "HTTP_503" { return "Acloud is temporarily unavailable. Keep your original and retry later." }
  if item.lastErrorCode == "HTTP_403" { return "This backup request was not allowed. Check your account access or contact support." }
  if item.lastErrorCode == "CLOUD_QUOTA_REQUIRED" {return "Your Acloud storage is full for this backup. Review Storage and pending transfers, then resume. Freeing space on this iPad does not increase your Acloud allowance."}
@@ -96,6 +97,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
  private var worker:Task<Void,Never>?
  var backgroundCompletion:(@Sendable()->Void)?
  private var connectionGate=ConnectionGeneration()
+ var needsSignIn:Bool {items.contains{["AUTHENTICATION_REQUIRED","HTTP_401"].contains($0.lastErrorCode ?? "")}}
  func resumeAfterSignIn(){connectionGate.resume()}
  func connect() async throws {
   while connectionGate.isConnecting{try await Task.sleep(for:.milliseconds(20))}
@@ -204,7 +206,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
    }
    await reconcileManifests();try connectionGate.validate(generation);await observeTransferAlerts()
    if let account=previewAccount,let queue{AcloudThumbnailPublisher.start(account:account,queue:queue)}
-  }catch is CancellationError {}catch{message="Could not load backups. Check your connection and try again."}
+  }catch is CancellationError {}catch AccountAPIError.unauthorized{message="Sign in again from Account. Your queued backups are kept."}catch{message="Could not load backups. Check your connection and try again."}
  }
 
  func verifiedInBackground() async {await reconcileManifests();await observeTransferAlerts();if let account=previewAccount,let queue{AcloudThumbnailPublisher.start(account:account,queue:queue)}}
@@ -415,7 +417,7 @@ private struct DevelopmentTestPreparer: ResourcePreparer {
   }
  }
  func tick() async {
-  do{try await connect();startWorker(requestAnotherPass:false);await refresh()}catch{message="Waiting for a connection. Check Account if this continues."}
+  do{try await connect();startWorker(requestAnotherPass:false);await refresh()}catch AccountAPIError.unauthorized{message="Sign in again from Account. Your queued backups are kept."}catch{message="Waiting for a connection. Check Account if this continues."}
  }
  func stopForSignOut() async throws {
   connectionGate.suspend()

@@ -27,7 +27,7 @@ public struct AuthAPI {
             self.session = URLSession(configuration: config, delegate: NoAccountRedirects(), delegateQueue: nil)
         }
     }
-    private func request(_ path: String, method: String = "GET", body: Data? = nil, authenticated: Bool = false) async throws -> Data {
+    private func request(_ path: String, method: String = "GET", body: Data? = nil, authenticated: Bool = false, credential:String? = nil) async throws -> Data {
         guard let scheme = baseURL.scheme, ["http", "https"].contains(scheme) else { throw AccountAPIError.invalidConfiguration }
         // Plain HTTP permitted only for local development hosts, never remote auth.
         if scheme == "http" && !(baseURL.host == "localhost" || baseURL.host == "127.0.0.1" || baseURL.host?.hasSuffix(".local") == true) { throw AccountAPIError.invalidConfiguration }
@@ -44,8 +44,11 @@ public struct AuthAPI {
         request.timeoutInterval = 10
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var authorizedToken:String?
         if authenticated {
-            guard let token = try store.read() else { throw AccountAPIError.unauthorized }
+            let current=try credential ?? store.read()
+            guard let token = current else { throw AccountAPIError.unauthorized }
+            authorizedToken=token
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         let (data, response) = try await session.data(for: request)
@@ -53,7 +56,7 @@ public struct AuthAPI {
         if let expected,http.value(forHTTPHeaderField:"X-Environment-Fingerprint") != expected{throw AccountAPIError.invalidConfiguration}
         if http.statusCode == 401 {
             // A failed login must not delete an unrelated existing session.
-            if authenticated { try store.clear() }
+            if let authorizedToken { try store.clear(ifMatching:authorizedToken) }
             throw AccountAPIError.unauthorized
         }
         guard (200..<300).contains(http.statusCode) else { throw AccountAPIError.requestFailed }
@@ -95,9 +98,10 @@ public struct AuthAPI {
         try JSONDecoder().decode(AccountStatus.self, from: await request("me", authenticated: true))
     }
     public func logout() async throws {
-        do { _ = try await request("auth/logout", method: "POST", authenticated: true) }
-        catch AccountAPIError.unauthorized { try store.clear(); return }
+        guard let previous=try store.read() else{return}
+        do { _ = try await request("auth/logout", method: "POST", authenticated: true,credential:previous) }
+        catch AccountAPIError.unauthorized {try store.clear(ifMatching:previous); return }
         // On network failure retain the credential for retry, instead of claiming server revocation.
-        try store.clear()
+        try store.clear(ifMatching:previous)
     }
 }

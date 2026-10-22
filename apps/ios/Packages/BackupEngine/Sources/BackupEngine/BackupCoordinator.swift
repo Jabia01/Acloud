@@ -138,7 +138,9 @@ public actor BackupCoordinator {
    guard var latest=try await queue.read(id) else{throw error}
    if [.paused,.cancelled,.protected].contains(latest.state){try await preparer.cleanup(latest);return}
    if error is CancellationError{return}
-   if error as? BackupFailure == .cloudQuota || error as? BackupFailure == .deviceSpace || StorageSpace.isFull(error) {
+   if error as? BackupFailure == .http(401) {
+    latest.state = .paused;latest.lastErrorCode="AUTHENTICATION_REQUIRED";latest.nextRetryAt=nil
+   } else if error as? BackupFailure == .cloudQuota || error as? BackupFailure == .deviceSpace || StorageSpace.isFull(error) {
     latest.state = .paused;latest.lastErrorCode=error as? BackupFailure == .cloudQuota ? "CLOUD_QUOTA_REQUIRED":"DEVICE_SPACE_REQUIRED";latest.nextRetryAt=nil
    } else if error as? BackupFailure == .waitingForOriginal || error as? BackupFailure == .inaccessible {
     latest.state = .paused;latest.lastErrorCode=error as? BackupFailure == .waitingForOriginal ? "WAITING_FOR_ICLOUD_ORIGINAL" : "LOCAL_ACCESS_UNAVAILABLE"
