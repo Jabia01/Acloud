@@ -22,6 +22,6 @@ Failed resumable transfers retain their reservation until cancellation or expiry
 
 Passed API build and unit suite (29 tests), website production build and unit suite (143 tests), followed by 18 focused dashboard/download tests including the additional capacity-render test, MediaPreservation suite (55 tests), BackupEngine suite (117 tests plus three targeted capacity checks), and RestoreEngine suite (113 tests plus targeted complete-media coverage). Native simulator build passed; the final PhotoKit disk-full classification adjustment is also build-checked. Secret scan clean apart from the existing allowed example values.
 
-Three additional PostgreSQL integration cases cover quota denial without reservation, cancellation expiry/idempotent release, and preservation of protected bytes when a failed upload is cancelled. They could not run locally because the Docker engine did not respond. They must pass before publication is treated as verified.
+Docker recovered on 22 October after restarting the backend left stalled by the earlier disk-full failure. All 50 private-owner PostgreSQL integration tests passed against a disposable local database, including the three new cases: quota denial without reservation, cancellation expiry/idempotent release, and preservation of protected bytes when a failed upload is cancelled. The generated database container and temporary credential files were removed afterward.
 
 Physical iPad testing, installation, and publication are not completed by this local change. Railway key rotation remains a separate pending task.
