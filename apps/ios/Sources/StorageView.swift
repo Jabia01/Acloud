@@ -2,6 +2,7 @@ import SwiftUI
 import LocalStorageManagement
 import HealthClient
 import BackupEngine
+import RestoreEngine
 @MainActor final class StorageScreen {
  static let model=StorageManagementModel()
  static func connect(force:Bool=false) async{
@@ -44,6 +45,7 @@ import BackupEngine
 struct StorageView:View {
  @ObservedObject private var model=StorageScreen.model
  @Environment(\.scenePhase) private var scenePhase
+ @State private var deviceAvailable:Int64?
  var body:some View {
   NavigationStack {
    List {
@@ -57,12 +59,13 @@ struct StorageView:View {
        ProgressView(value:Double(min(cloud.protectedBytes,cloud.quotaBytes)),total:Double(max(1,cloud.quotaBytes))).accessibilityLabel("Cloud storage used")
        Text("\(acloudCapacity(cloud.quotaBytes)) total capacity").foregroundStyle(.secondary)
        DisclosureGroup("About storage amounts"){Text("Storage is shown in GiB: 5 GB is about 4.7 GiB. Live Photos and edited photos may use more than one file.").font(.caption).foregroundStyle(.secondary)}
-       if cloud.overQuota {Label("Storage limit reached. Existing verified backups are retained.",systemImage:"exclamationmark.circle").foregroundStyle(.orange)}
+       if cloud.remainingBytes==0 {Label("Acloud allowance is full or reserved. Existing verified backups are retained.",systemImage:"exclamationmark.circle").foregroundStyle(.orange)}
       }.padding(.vertical,10)
       LazyVGrid(columns:[GridItem(.adaptive(minimum:140),spacing:12)],spacing:12) {
        AcloudMetric(title:"Available",value:acloudCapacity(cloud.remainingBytes),icon:"externaldrive.badge.plus")
        AcloudMetric(title:"Reserved for transfers",value:acloudCapacity(cloud.reservedBytes),icon:"arrow.up.circle")
       }.acloudFeatureRow()
+      if cloud.reservedBytes>0{Text("Pending uploads reserve cloud space. Failed or cancelled uploads may keep it until existing upload permissions expire. Refresh storage to update the totals.").font(.caption).foregroundStyle(.secondary)}
      } else {
       Label("Storage usage is unavailable",systemImage:"externaldrive.badge.questionmark").font(.headline)
       Text("Sign in and check your connection, then refresh.").foregroundStyle(.secondary)
@@ -73,6 +76,8 @@ struct StorageView:View {
      Button {Task{await StorageScreen.connect(force:true)}} label:{Label("Refresh storage",systemImage:"arrow.clockwise")}.disabled(model.busy || model.summaryRefreshing)
     }
     Section("Device space") {
+     if let deviceAvailable{AcloudMetric(title:"Free on this device",value:acloudCapacity(deviceAvailable),icon:"internaldrive")}
+     Text("Restoring needs free space on this device, even when your Acloud plan has room.").font(.footnote).foregroundStyle(.secondary)
      Label("Your originals stay on your device",systemImage:"iphone.and.arrow.forward").font(.headline)
      Text(model.enabled ? "Review protected items before removing device copies.":"Free Up Space isn’t available yet. Backing up does not remove anything from your device.").foregroundStyle(.secondary)
      if model.enabled {
@@ -80,7 +85,7 @@ struct StorageView:View {
      }
     }
    }.refreshable{await StorageScreen.connect(force:true)}.acloudCanvas().navigationTitle("Storage")
-  }.task{await StorageScreen.connect()}
+  }.task{deviceAvailable=try? SystemDeviceCapacity().available(at:FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]);await StorageScreen.connect()}
    .onChange(of:scenePhase){_,phase in if phase == .active{Task{await StorageScreen.connect()}}}
  }
 }

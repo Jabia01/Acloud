@@ -30,7 +30,9 @@ public actor HTTPMultipartAPI:MultipartAPI {
   let (data,response)=try await network.data(for:r)
   guard let http=response as? HTTPURLResponse else{throw BackupFailure.http(503)}
   if let fingerprint=Bundle.main.object(forInfoDictionaryKey:"BetaDeploymentFingerprint") as? String,http.value(forHTTPHeaderField:"X-Environment-Fingerprint") != fingerprint{throw BackupFailure.authorization}
-  guard (200..<300).contains(http.statusCode) else{throw BackupFailure.http(http.statusCode)}
+  guard (200..<300).contains(http.statusCode) else{
+   throw BackupFailure.responseFailure(status:http.statusCode,body:data)
+  }
   return try JSONDecoder().decode(T.self,from:data)
  }
  public func create(_ item:BackupItem) async throws -> MultipartSession {

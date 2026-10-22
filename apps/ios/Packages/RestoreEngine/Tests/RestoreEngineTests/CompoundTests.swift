@@ -64,3 +64,17 @@ final class CompoundTests:XCTestCase{
  }
 
 }
+
+private final class CompoundChangingSpace:DeviceCapacity,@unchecked Sendable {
+ private var calls=0;private let lock=NSLock()
+ func available(at:URL)throws->Int64?{lock.lock();defer{lock.unlock()};calls+=1;return calls==2 ? 0:Int64.max}
+}
+extension CompoundTests {
+ func testCompleteMediaChecksDeviceSpaceAgainBeforeSavingAndCanResume()async throws {
+  let(q,_,r,p,files)=try await fixture(),download=FakeDownload(),engine=CompoundRestoreCoordinator(queue:q,files:files,api:CompoundFixtureAPI(r.plan),downloader:download,photos:p,capacity:CompoundChangingSpace())
+  try await engine.activate(account:r.account,library:r.library)
+  do{try await engine.run(r.id);XCTFail("Expected device capacity failure")}catch{XCTAssertEqual(error as? RestoreFailure,.deviceSpace)}
+  let paused=try await q.read(r.id),saves=await p.saves;XCTAssertEqual(paused?.state,.paused);XCTAssertEqual(paused?.lastErrorCode,"DEVICE_SPACE_REQUIRED");XCTAssertEqual(saves,0)
+  try await engine.resume(r.id);try await engine.run(r.id);let done=try await q.read(r.id),count=await download.calls;XCTAssertEqual(done?.state,.restored);XCTAssertEqual(count,r.plan.resources.count)
+ }
+}

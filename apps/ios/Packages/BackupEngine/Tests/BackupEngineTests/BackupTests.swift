@@ -10,8 +10,8 @@ private func asset(_ id:UUID,status:String,size:Int) throws -> ServerAsset {
 }
 private actor TestAPI:MultipartAPI {
  let id=UUID(),assetID=UUID();var phase:RemoteAssetStatus = .queued;var size=0;var accepted:[CompletedPart]=[]
- var creates=0;var completed=false;var verificationUnavailable=false;var cancelled=false;var authorizations=0;var cancellationUnavailable=false
- func create(_ item:BackupItem) -> MultipartSession {creates+=1;size=item.expectedSizeBytes!;return response()}
+ var createError:BackupFailure?;var creates=0;var completed=false;var verificationUnavailable=false;var cancelled=false;var authorizations=0;var cancellationUnavailable=false
+ func create(_ item:BackupItem) throws -> MultipartSession {creates+=1;if let createError{throw createError};size=item.expectedSizeBytes!;return response()}
  func response() -> MultipartSession {MultipartSession(id:id,assetId:assetID,status:phase,partSizeBytes:5*1024*1024)}
  func status(_ id:UUID) -> MultipartSession{response()}
  func start(_ id:UUID) -> MultipartSession{phase = .uploading;return response()}
@@ -24,6 +24,7 @@ private actor TestAPI:MultipartAPI {
  func verify(_ id:UUID) throws -> MultipartSession{if verificationUnavailable{throw BackupFailure.http(503)};phase = .protected;return response()}
  func asset(_ id:UUID) throws -> ServerAsset{try BackupEngineTests.remote(assetID,status:phase.rawValue,size:size)}
  func cancel(_ id:UUID)throws{if cancellationUnavailable{throw BackupFailure.http(503)};cancelled=true;phase = .cancelled}
+ func failCreate(_ error:BackupFailure?){createError=error}
  func failCancellation(_ value:Bool){cancellationUnavailable=value}
  func accept(_ number:Int,size:Int){accepted.removeAll{$0.partNumber==number};accepted.append(CompletedPart(partNumber:number,sizeBytes:size))}
  func failVerification(_ value:Bool){verificationUnavailable=value}
@@ -78,6 +79,20 @@ final class BackupEngineTests:XCTestCase {
   _=try await queue.enqueue(item)
   let engine=BackupCoordinator(queue:queue,api:api,transport:transport,preparer:GeneratedResourcePreparer(sourceDirectory:source,files:files),files:files,partConcurrency:partConcurrency,onProtected:onProtected)
   try await engine.setNetwork(NetworkSnapshot());return(queue,engine,api,transport,item,files,d)
+ }
+ func testNoDeviceSpacePausesBeforePreparingOrCreatingServerReservation()async throws {
+  let(q,_,api,t,item,files,d)=try await fixture(bytes:100)
+  let engine=BackupCoordinator(queue:q,api:api,transport:t,preparer:GeneratedResourcePreparer(sourceDirectory:d.appendingPathComponent("source"),files:files),files:files,availableSpace:{_ in 1})
+  try await engine.setNetwork(NetworkSnapshot())
+  do{try await engine.run(item.id);XCTFail("Expected space failure")}catch{XCTAssertEqual(error as? BackupFailure,.deviceSpace)}
+  let saved=try await q.read(item.id),created=await api.creates
+  XCTAssertEqual(saved?.state,.paused);XCTAssertEqual(saved?.lastErrorCode,"DEVICE_SPACE_REQUIRED");XCTAssertEqual(created,0)
+ }
+ func testCloudQuotaPausesWithoutConsumingNetworkRetryBudgetAndCanResume()async throws {
+  let(q,e,api,_,item,_,_)=try await fixture(bytes:100);await api.failCreate(.cloudQuota)
+  do{try await e.run(item.id);XCTFail("Expected quota failure")}catch{XCTAssertEqual(error as? BackupFailure,.cloudQuota)}
+  let saved=try await q.read(item.id);XCTAssertEqual(saved?.state,.paused);XCTAssertEqual(saved?.lastErrorCode,"CLOUD_QUOTA_REQUIRED");XCTAssertEqual(saved?.retryCount,0)
+  await api.failCreate(nil);try await e.resume(item.id);try await e.run(item.id);let state=try await q.read(item.id)?.state;XCTAssertEqual(state,.protected)
  }
  func testParallelMultipartIsBoundedAndReconcilesBeforeProtection()async throws {
   let(q,e,api,t,item,_,_)=try await fixture(partConcurrency:2)

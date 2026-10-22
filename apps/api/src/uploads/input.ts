@@ -11,7 +11,8 @@ export const maxUploadBytes = () => setting('UPLOAD_MAX_BYTES',5*1024*1024,5*102
 export const maxMultipartBytes = () => setting('MULTIPART_MAX_BYTES',1024*1024*1024,10*1024*1024*1024);
 export const partSize = () => { const n=setting('MULTIPART_PART_BYTES',8*1024*1024,64*1024*1024); if(n<5*1024*1024) throw new Error('Part size too small'); return n; };
 export const sessionTTL = () => setting('MULTIPART_SESSION_SECONDS',7*24*3600,7*24*3600);
-export const uploadTTL = () => setting('UPLOAD_TTL_SECONDS',300,300);
+export const maximumUploadAuthorizationSeconds=300;
+export const uploadTTL = () => setting('UPLOAD_TTL_SECONDS',maximumUploadAuthorizationSeconds,maximumUploadAuthorizationSeconds);
 export const downloadTTL = () => setting('DOWNLOAD_TTL_SECONDS',60,60);
 export const defaultQuota = () => setting('FREE_DEV_QUOTA_BYTES',20*1024*1024,Number.MAX_SAFE_INTEGER);
 export function uploadInput(value: unknown): UploadInput {

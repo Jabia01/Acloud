@@ -149,4 +149,25 @@ describe('private owner device staging mode',{concurrency:false},()=>{
   await pool.query('UPDATE sessions SET revoked_at=now() WHERE id=$1',[browser.sessionId]);await assert.rejects(uploads.download(browser,asset.assetId));
  });
 
+ test('quota failure distinguishes cloud capacity and reserves no extra space',async()=>{
+  await pool.query("INSERT INTO manual_entitlements(user_id,quota_bytes,reason) VALUES($1,50,'GENERATED_TEST')",[p.userId]);
+  await assert.rejects(uploads.create(p,input(),randomUUID()),error=>{const body=error.getResponse();assert.equal(body.code,'CLOUD_QUOTA_EXCEEDED');assert.equal(body.requiredBytes,100);assert.equal(body.availableBytes,50);return true});
+  assert.equal((await pool.query('SELECT count(*)::int n FROM upload_sessions WHERE user_id=$1',[p.userId])).rows[0].n,0);
+ });
+ test('cancelled multipart holds quota only through its bounded permission window, then releases once',async()=>{
+  const r=await uploads.create(p,input(),randomUUID());const first=await uploads.cancel(p,r.id),until=Date.parse(first.expiresAt);
+  assert.ok(until>Date.now()+290000&&until<=Date.now()+361000);const repeated=await uploads.cancel(p,r.id);assert.equal(Date.parse(repeated.expiresAt),until);
+  assert.equal((await uploads.summary(p,'storage')).reservedBytes,100);
+  await pool.query("UPDATE upload_sessions SET expires_at=now()-interval '1 second' WHERE id=$1",[r.id]);
+  for(let i=0;i<2;i++){const summary=await uploads.summary(p,'storage');assert.equal(summary.reservedBytes,0);assert.equal(summary.protectedBytes,0)}
+ });
+ test('failed verification holds its retry reservation; cancel and expiry release it without changing protected files',async()=>{
+  const protectedCopy=await protectedAsset(),r=await uploads.create(p,input(),randomUUID());await uploads.multipartStart(p,r.id);await uploads.completeMultipart(p,r.id);
+  const original=storage.verifyObject;storage.verifyObject=async()=>({ok:false,code:'CHECKSUM_MISMATCH'});
+  try{assert.equal((await uploads.complete(p,r.id)).status,'FAILED')}finally{storage.verifyObject=original}
+  assert.equal((await uploads.summary(p,'storage')).reservedBytes,100);await uploads.cancel(p,r.id);await pool.query("UPDATE upload_sessions SET expires_at=now()-interval '1 second' WHERE id=$1",[r.id]);
+  for(let i=0;i<2;i++){const summary=await uploads.summary(p,'storage');assert.equal(summary.reservedBytes,0);assert.equal(summary.protectedBytes,100)}
+  assert.equal((await uploads.asset(p,protectedCopy.assetId)).status,'PROTECTED');await assert.rejects(uploads.cancel(p,protectedCopy.id));
+ });
+
 });

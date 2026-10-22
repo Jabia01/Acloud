@@ -5,7 +5,7 @@ export const runtime='nodejs';
 const headers={'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'};
 function failure(message:string,status:number){
  // Only fixed server-owned messages are rendered; no URL, capability or upstream body.
- const body=`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Acloud download</title><main><h1>Download unavailable</h1><p>${message}</p><p><a href="/photos">Back to saved photos</a> · <a href="/videos">Saved videos</a> · <a href="/login">Sign in</a></p><p>Your saved backup has not been changed.</p></main></html>`;
+ const body=`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Acloud download</title><main><h1>Download unavailable</h1><p>${message}</p><p><a href="/photos">Back to saved photos</a> · <a href="/videos">Saved videos</a> · <a href="/login">Sign in</a></p><p>Your saved backup has not been changed.</p><p>If your browser cannot save a download, check free space on this computer. Your Acloud allowance and device storage are separate.</p></main></html>`;
  return new Response(body,{status,headers:{...headers,'Content-Type':'text/html; charset=utf-8','Content-Security-Policy':"default-src 'none'; base-uri 'none'; frame-ancestors 'none'"}});
 }
 export async function GET(request:Request,{params}:{params:Promise<{segments:string[]}>}){

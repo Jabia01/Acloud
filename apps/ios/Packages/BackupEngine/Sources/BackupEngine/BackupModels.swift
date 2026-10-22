@@ -24,7 +24,7 @@ public enum BackupState: String, Codable, Sendable, CaseIterable {
   }
  }
 }
-public enum BackupFailure: Error, Equatable { case storage, staleWrite, illegalTransition, missing, sourceChanged, waitingForOriginal, inaccessible, unsupported, policy, authorization, http(Int), retryLimit }
+public enum BackupFailure: Error, Equatable { case deviceSpace, cloudQuota, storage, staleWrite, illegalTransition, missing, sourceChanged, waitingForOriginal, inaccessible, unsupported, policy, authorization, http(Int), retryLimit }
 public struct BackupItem: Codable, Sendable, Identifiable {
  public let id: UUID
  public let libraryID: UUID
@@ -151,6 +151,8 @@ public extension BackupFailure {
   case .sourceChanged: return "SOURCE_CHANGED"
   case .unsupported: return "UNSUPPORTED_MEDIA"
   case .storage: return "LOCAL_STORAGE_UNAVAILABLE"
+  case .deviceSpace: return "DEVICE_SPACE_REQUIRED"
+  case .cloudQuota: return "CLOUD_QUOTA_REQUIRED"
   case .missing: return "REQUIRED_STATE_MISSING"
   case .policy: return "POLICY_BLOCKED"
   case .waitingForOriginal: return "WAITING_FOR_ICLOUD_ORIGINAL"
@@ -163,3 +165,11 @@ public extension BackupFailure {
 }
 
 public extension PartTransport {var keepsTransfersDuringConnectionLoss:Bool {false}}
+
+extension BackupFailure {
+ static func responseFailure(status:Int,body:Data)->BackupFailure {
+  struct Problem:Decodable{let code:String}
+  if status==409,body.count<=4096,let problem=try? JSONDecoder().decode(Problem.self,from:body),problem.code=="CLOUD_QUOTA_EXCEEDED"{return .cloudQuota}
+  return .http(status)
+ }
+}

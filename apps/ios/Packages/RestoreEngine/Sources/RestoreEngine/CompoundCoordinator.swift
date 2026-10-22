@@ -1,4 +1,5 @@
 import Foundation
+import MediaPreservation
 public actor CompoundRestoreCoordinator{
  private let queue:CompoundRestoreQueue,files:RestoreFiles,api:any CompoundRestoreAPI,downloader:any RestoreDownloader,photos:any CompoundPhotoLibraryRestorer,capacity:any DeviceCapacity
  private var account:UUID?,library:UUID?,active:Task<Void,Error>?,activeID:UUID?
@@ -23,7 +24,7 @@ public actor CompoundRestoreCoordinator{
  public func runDue()async{guard active==nil,let account,let library else{return};var cursor:UUID?;while let page=try? await queue.page(account:account,library:library,after:cursor,limit:50),!page.isEmpty{for r in page where r.state == .queued || r.state == .retryable || r.state == .ready{guard self.account==account,self.library==library,!Task.isCancelled else{return};try? await run(r.id)};cursor=page.last?.id}}
  public func run(_ id:UUID)async throws{guard active==nil else{return};let task=Task{try await self.execute(id)};active=task;activeID=id;defer{active=nil;activeID=nil};try await task.value}
  private func execute(_ id:UUID)async throws{var r=try await latest(id);guard [.queued,.retryable,.ready].contains(r.state),r.plan.valid,r.plan.reconstructable else{return};do{
-   let bytes=r.plan.resources.reduce(Int64(0)){$0+Int64($1.evidence.expectedSize)};if let free=try capacity.available(at:files.directory),free<bytes*2+64*1024*1024{r.state = .paused;r.lastErrorCode="DEVICE_SPACE_REQUIRED";_=try await queue.save(r);return}
+   let bytes=r.plan.resources.reduce(Int64(0)){$0+Int64($1.evidence.expectedSize)};if let free=try capacity.available(at:files.directory),free<StorageSpace.required(bytes:bytes,copies:r.state == .ready ? 1:2){r.state = .paused;r.lastErrorCode="DEVICE_SPACE_REQUIRED";_=try await queue.save(r);return}
    if r.state != .ready{r=try await move(id,.authorizing);let plan=try await api.compoundPlan(r.plan.manifest.id,fingerprint:r.plan.manifest.manifestFingerprint,choice:r.plan.choice);guard plan==r.plan,plan.valid else{throw RestoreFailure.versionChanged};r=try await move(id,.downloading)
     let record=r
     for start in stride(from:0,to:r.plan.resources.count,by:2){
@@ -35,9 +36,10 @@ public actor CompoundRestoreCoordinator{
     }
     r=try await move(id,.verifying);for resource in r.plan.resources{try verifier(r,resource)};r=try await move(id,.ready)
    }
+   if let free=try capacity.available(at:files.directory),free<StorageSpace.required(bytes:bytes,copies:1){throw RestoreFailure.deviceSpace}
    for resource in r.plan.resources{try verifier(r,resource)};guard await photos.canSave() else{throw RestoreFailure.permission};let resources=r.plan.resources.map{CompoundSaveResource(role:$0.role,resourceType:$0.resourceType,uti:$0.uti,file:files.url(r.fileIDs[$0.id]!))};try await photos.validate(resources);let final=try await api.compoundPlan(r.plan.manifest.id,fingerprint:r.plan.manifest.manifestFingerprint,choice:r.plan.choice);guard final.valid,final==r.plan else{throw RestoreFailure.versionChanged};r=try await move(id,.saving);try bound(r)
    let local=try await photos.save(resources);guard var saved=try await queue.read(id) else{throw RestoreFailure.ambiguousSave};saved.localIdentifier=local;saved=try await queue.save(saved);_=try await queue.save(saved,completedIdentifier:local);try remove(saved)
-  }catch{guard var failed=try await queue.read(id),![.restored,.cancelled].contains(failed.state) else{throw error};if failed.state == .saving{failed.state = .reconcile;failed.lastErrorCode="SAVE_RESULT_UNCERTAIN"}else if error is CancellationError||account==nil||error as? RestoreFailure == .permission{failed.state = .paused}else{failed.state = .permanent;failed.lastErrorCode="COMPLETE_RESTORE_FAILED"};_=try await queue.save(failed);throw error}}
+  }catch{guard var failed=try await queue.read(id),![.restored,.cancelled].contains(failed.state) else{throw error};if failed.state == .saving{failed.state = .reconcile;failed.lastErrorCode="SAVE_RESULT_UNCERTAIN"}else if error as? RestoreFailure == .deviceSpace || StorageSpace.isFull(error){failed.state = .paused;failed.lastErrorCode="DEVICE_SPACE_REQUIRED"}else if error is CancellationError||account==nil||error as? RestoreFailure == .permission{failed.state = .paused}else{failed.state = .permanent;failed.lastErrorCode="COMPLETE_RESTORE_FAILED"};_=try await queue.save(failed);throw error}}
  public func pause(_ id:UUID)async throws{var r=try await latest(id);guard ![.saving,.reconcile,.restored,.cancelled].contains(r.state) else{return};r.state = .paused;_=try await queue.save(r);if activeID==id{active?.cancel();_=try? await active?.value}}
  public func resume(_ id:UUID)async throws{var r=try await latest(id);guard [.paused,.retryable,.permanent].contains(r.state) else{throw RestoreFailure.ambiguousSave};r.state = .queued;_=try await queue.save(r)}
  public func cancel(_ id:UUID)async throws{try await pause(id);var r=try await latest(id);guard r.state == .paused else{throw RestoreFailure.ambiguousSave};r.state = .cancelled;r=try await queue.save(r);try remove(r)}

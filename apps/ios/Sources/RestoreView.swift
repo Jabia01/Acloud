@@ -129,7 +129,9 @@ if next{selected=[]}else{selected.formIntersection(Set(assets.map(\.id)))};messa
    let allowed=ownerTestAssets ?? Set(developmentTestAsset.map{[$0]} ?? [])
    guard RestoreSelectionPolicy.accepts(selected,allowed:allowed) else{throw RestoreFailure.disabled}
    #endif
-   if let availableBytes,selectedBytes*2>availableBytes-64*1024*1024{message="Insufficient estimated device space. Select a smaller batch; unrelated content is never removed.";return}
+   if let files{availableBytes=try? SystemDeviceCapacity().available(at:files.directory)}
+   let required=StorageSpace.required(bytes:selectedBytes)
+   if !StorageSpace.permits(available:availableBytes,required:required){message="This iPad needs about \(required.formatted(.byteCount(style:.file))) free for this restore; \((availableBytes ?? 0).formatted(.byteCount(style:.file))) is available. Select fewer items or free device space. Your cloud backups stay saved.";return}
    let planner=RestorePlanner(queue:queue,photos:PhotoKitRestorer())
    var queued=0,existing=0,failed=0
    for id in selected.sorted(by:{$0.uuidString<$1.uuidString}) {
@@ -315,6 +317,7 @@ struct RestoreView:View {
   VStack(alignment:.leading,spacing:12) {
    AcloudMediaHeader(type:record.plan.manifest.mediaType,reference:record.plan.manifest.id,previewSource:.backupVersion,dateLabel:"Restore requested",date:record.createdAt,detail:"\(record.plan.resources.count) files · \(record.plan.manifest.kind.rawValue.replacingOccurrences(of:"_",with:" ").capitalized)")
    Text(record.state.displayTitle).font(.subheadline.weight(.semibold))
+   if let code=record.lastErrorCode{Text(restoreGuidance(code)).font(.footnote).foregroundStyle(.secondary)}
    if ![.restored,.saving,.reconcile,.cancelled].contains(record.state) {
     HStack{Button("Pause"){Task{await model.compoundControl(record,"pause")}};Button("Retry"){Task{await model.compoundControl(record,"resume")}};Button("Cancel",role:.destructive){Task{await model.compoundControl(record,"cancel")}}}.buttonStyle(.bordered).disabled(model.busy)
    }
@@ -332,6 +335,7 @@ struct RestoreView:View {
  }
  private func restoreGuidance(_ code:String)->String {
   if code.hasPrefix("PHOTOS_SAVE_ERROR_"){return "Photos reported a save error (code \(code.dropFirst(18))). This copy is unconfirmed; review before restoring again."}
+  if code=="DEVICE_SPACE_REQUIRED"{return "This iPad needs more free space to finish the restore. Free device space or select fewer items, then resume. Your Acloud backups stay saved."}
   if code=="SAVE_RESULT_UNCERTAIN"{return "Photos may already contain this copy. Review before restoring again."}
   if code=="INTEGRITY_FAILED"{return "The downloaded file could not be verified. Try again."}
   if code=="PHOTOS_PERMISSION_REQUIRED"{return "Allow Photos additions to continue."}

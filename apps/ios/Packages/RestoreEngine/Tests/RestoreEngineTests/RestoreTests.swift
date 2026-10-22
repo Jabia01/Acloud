@@ -115,3 +115,23 @@ final class RestoreTests:RestoreTestBase{
  func testRestrictedPhotoAuthorizationCannotWrite(){XCTAssertFalse(PhotoKitRestorer.writeAllowed(add:.restricted,read:.restricted));XCTAssertFalse(PhotoKitRestorer.writeAllowed(add:.denied,read:.denied));XCTAssertTrue(PhotoKitRestorer.writeAllowed(add:.authorized,read:.denied));XCTAssertTrue(PhotoKitRestorer.writeAllowed(add:.denied,read:.limited))}
  #endif
 }
+
+private final class ChangingSpace:DeviceCapacity,@unchecked Sendable{
+ private let lock=NSLock();private var count=0
+ func available(at:URL)throws->Int64?{lock.lock();defer{lock.unlock()};count+=1;return count==2 ? 0:Int64.max}
+}
+extension RestoreTests {
+ func testSpaceLostBeforeSavePausesAndReusesVerifiedDownloadAfterResume()async throws {
+  let f=try await fixture(),capacity=ChangingSpace(),engine=RestoreCoordinator(queue:f.queue,files:f.files,api:f.api,downloader:f.download,photos:f.photos,capacity:capacity)
+  try await engine.activate(account:f.item.accountID,library:f.item.libraryID)
+  do{try await engine.run(f.item.id);XCTFail("Expected space failure")}catch{XCTAssertEqual(error as? RestoreFailure,.deviceSpace)}
+  let paused=try await f.queue.read(f.item.id),saves=await f.photos.saves;XCTAssertEqual(paused?.state,.paused);XCTAssertEqual(paused?.lastErrorCode,"DEVICE_SPACE_REQUIRED");XCTAssertEqual(saves,0)
+  try await engine.resume(f.item.id);try await engine.run(f.item.id)
+  let done=try await f.queue.read(f.item.id),downloads=await f.download.calls;XCTAssertEqual(done?.state,.restored);XCTAssertEqual(downloads,1)
+ }
+ func testDiskFullDuringDownloadPausesWithoutClaimingProtectionOrSaving()async throws {
+  let f=try await fixture();await f.download.configure(failure:NSError(domain:NSCocoaErrorDomain,code:NSFileWriteOutOfSpaceError))
+  do{try await f.engine.run(f.item.id);XCTFail("Expected download failure")}catch{}
+  let saved=try await f.queue.read(f.item.id),saves=await f.photos.saves;XCTAssertEqual(saved?.state,.paused);XCTAssertEqual(saved?.lastErrorCode,"DEVICE_SPACE_REQUIRED");XCTAssertEqual(saves,0)
+ }
+}

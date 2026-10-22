@@ -10,7 +10,7 @@ import type { PoolClient } from 'pg';
 import { DatabaseService } from '../database.service';
 import type { Principal } from '../auth/auth.service';
 import { ObjectStorageProvider, type VerificationResult } from './storage';
-import { defaultQuota, downloadTTL, uploadTTL, partSize, sessionTTL, type UploadInput } from './input';
+import { defaultQuota, downloadTTL, uploadTTL, maximumUploadAuthorizationSeconds, partSize, sessionTTL, type UploadInput } from './input';
 export const safeAsset = (r: Record<string,any>) => ({id:r.id,mediaType:r.media_type,status:r.status,sizeBytes:r.verified_size_bytes === null ? null : Number(r.verified_size_bytes)});
 const safeUpload = (r: Record<string,any>) => ({id:r.id,assetId:r.asset_id,status:r.status,expiresAt:new Date(r.expires_at).toISOString(),errorCode:r.last_error_code ?? null,transferMode:r.transfer_mode ?? 'single',partSizeBytes:r.part_size_bytes ? Number(r.part_size_bytes) : null});
 @Injectable()
@@ -57,7 +57,11 @@ export class UploadService {
       if(Number((await c.query('SELECT count(*) n FROM upload_sessions WHERE user_id=$1 AND reservation_released_at IS NULL',[p.userId])).rows[0].n)>=limitSetting('MAX_PENDING_UPLOADS',1000,10000))throw new ConflictException('Upload queue limit reached');
       if(input.multipart&&Number((await c.query("SELECT count(*) n FROM upload_sessions WHERE user_id=$1 AND transfer_mode='multipart' AND reservation_released_at IS NULL",[p.userId])).rows[0].n)>=limitSetting('MAX_PARALLEL_MULTIPART',10,100))throw new ConflictException('Multipart concurrency limit reached');
       const reserved = await c.query('UPDATE development_entitlements SET reserved_bytes=reserved_bytes+$2 WHERE user_id=$1 AND protected_bytes+reserved_bytes+$2<=quota_bytes RETURNING user_id',[p.userId,input.size]);
-      if (!reserved.rowCount) throw new ConflictException('Quota exceeded');
+      if (!reserved.rowCount) {
+        const e=(await c.query('SELECT quota_bytes,protected_bytes,reserved_bytes FROM development_entitlements WHERE user_id=$1',[p.userId])).rows[0];
+        const available=e?BigInt(e.quota_bytes)-BigInt(e.protected_bytes)-BigInt(e.reserved_bytes):0n;
+        throw new ConflictException({message:'Your Acloud storage does not have enough room for this backup. Check Storage for available space and pending transfers.',code:'CLOUD_QUOTA_EXCEEDED',requiredBytes:input.size,availableBytes:Number(available>0n?available:0n)});
+      }
       const assetId=randomUUID(),id=randomUUID(),key=`objects/${randomUUID().slice(0,8)}/${randomUUID()}`;
       await c.query("INSERT INTO assets(id,user_id,device_id,media_type,expected_size_bytes,expected_checksum,storage_object_key,storage_provider,storage_binding,source_library_id,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'QUEUED')",[assetId,p.userId,deviceId,input.mediaType,input.size,input.checksum,key,this.storage.identity().provider,this.storage.identity().binding,input.libraryId??null]);
       const created = await c.query(`INSERT INTO upload_sessions(id,user_id,asset_id,idempotency_key,request_hash,status,expected_size_bytes,expected_checksum,expires_at,transfer_mode,part_size_bytes)
@@ -166,10 +170,11 @@ export class UploadService {
       if (r.status==='PROTECTED') throw new ConflictException('Protected assets cannot be cancelled');
       if (!r.reservation_released_at && r.status !== 'CANCELLED') {
         await c.query("UPDATE assets SET status='CANCELLED',updated_at=now() WHERE id=$1",[r.asset_id]);
-        await c.query("UPDATE upload_sessions SET status='CANCELLED',verification_lease=NULL,verification_lease_until=NULL WHERE id=$1",[id]);
+        await c.query("UPDATE upload_sessions SET status='CANCELLED',verification_lease=NULL,verification_lease_until=NULL,expires_at=LEAST(expires_at,now()+$2*interval '1 second') WHERE id=$1",[id,maximumUploadAuthorizationSeconds+60]);
         await this.audit(c,p,id,'CANCELLED');
       }
-      // Keep the reservation until expiry: an already signed PUT may still land.
+      // Hold quota until every previously issued PUT permission has expired, plus
+      // a clock allowance. Do not keep a cancelled multipart reservation for seven days.
       return safeUpload((await c.query('SELECT * FROM upload_sessions WHERE id=$1',[id])).rows[0]);
     });
   }

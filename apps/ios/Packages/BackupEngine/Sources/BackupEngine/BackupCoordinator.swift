@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import MediaPreservation
 import UploadFoundation
 
 public actor BackupCoordinator {
@@ -9,6 +10,7 @@ public actor BackupCoordinator {
  private let preparer:any ResourcePreparer
  private let files:ManagedTemporaryFiles
  private let onProtected:@Sendable() async->Void
+ private let availableSpace:@Sendable(URL)throws->Int64?
  private let retry:RetryPolicy
  private let performance=Logger(subsystem:"com.acloud.transfers",category:"backup-performance")
  private let fileConcurrency:Int,partConcurrency:Int
@@ -17,8 +19,9 @@ public actor BackupCoordinator {
  private var network=NetworkSnapshot(connected:false)
  private var active:[UUID:Task<Void,Error>]=[:]
  private var failureStages:[UUID:String]=[:]
- public init(queue:SQLiteBackupQueue,api:any MultipartAPI,transport:any PartTransport,preparer:any ResourcePreparer,files:ManagedTemporaryFiles,policy:BackupPolicy=BackupPolicy(),retry:RetryPolicy=RetryPolicy(),fileConcurrency:Int=2,partConcurrency:Int=2,onProtected:@escaping @Sendable() async->Void={}) {
+ public init(queue:SQLiteBackupQueue,api:any MultipartAPI,transport:any PartTransport,preparer:any ResourcePreparer,files:ManagedTemporaryFiles,policy:BackupPolicy=BackupPolicy(),retry:RetryPolicy=RetryPolicy(),fileConcurrency:Int=2,partConcurrency:Int=2,availableSpace:@escaping @Sendable(URL)throws->Int64?={try $0.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage},onProtected:@escaping @Sendable() async->Void={}) {
   self.fileConcurrency=max(1,min(2,fileConcurrency));self.partConcurrency=max(1,min(2,partConcurrency))
+  self.availableSpace=availableSpace
   self.queue=queue;self.api=api;self.transport=transport;self.preparer=preparer;self.files=files;self.policy=policy;self.retry=retry;self.onProtected=onProtected
  }
  public func setNetwork(_ value:NetworkSnapshot) async throws {
@@ -86,6 +89,8 @@ public actor BackupCoordinator {
     }
    }
    guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");return}
+   let required=StorageSpace.required(bytes:Int64(item.expectedSizeBytes ?? 0),copies:1)
+   if !StorageSpace.permits(available:try availableSpace(files.directory),required:required){throw BackupFailure.deviceSpace}
    _=try await transition(id,.preparing)
    failureStages[id]="Preparing original"
    let preparationStarted=Date()
@@ -133,7 +138,9 @@ public actor BackupCoordinator {
    guard var latest=try await queue.read(id) else{throw error}
    if [.paused,.cancelled,.protected].contains(latest.state){try await preparer.cleanup(latest);return}
    if error is CancellationError{return}
-   if error as? BackupFailure == .waitingForOriginal || error as? BackupFailure == .inaccessible {
+   if error as? BackupFailure == .cloudQuota || error as? BackupFailure == .deviceSpace || StorageSpace.isFull(error) {
+    latest.state = .paused;latest.lastErrorCode=error as? BackupFailure == .cloudQuota ? "CLOUD_QUOTA_REQUIRED":"DEVICE_SPACE_REQUIRED";latest.nextRetryAt=nil
+   } else if error as? BackupFailure == .waitingForOriginal || error as? BackupFailure == .inaccessible {
     latest.state = .paused;latest.lastErrorCode=error as? BackupFailure == .waitingForOriginal ? "WAITING_FOR_ICLOUD_ORIGINAL" : "LOCAL_ACCESS_UNAVAILABLE"
    } else {
     latest.retryCount+=1;let canRetry=retry.retryable(error) && latest.retryCount<retry.maximumAttempts
@@ -153,6 +160,7 @@ public actor BackupCoordinator {
   let item=try await current(id)
   guard policy.permits(item,network:network) else{try await pause(id,reason:"NETWORK_POLICY");throw CancellationError()}
   failureStages[id]="Preparing upload part"
+  if !StorageSpace.permits(available:try availableSpace(files.directory),required:StorageSpace.required(bytes:Int64(size),copies:1)){throw BackupFailure.deviceSpace}
   let part=try files.part(resource,id:id,number:number,size:size)
   defer{try? files.remove(part.fileURL)}
   try await uploadPart(id,sessionID:sessionID,number:number,part:part)

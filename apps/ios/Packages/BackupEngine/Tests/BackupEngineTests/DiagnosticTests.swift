@@ -11,3 +11,7 @@ final class DiagnosticTests:XCTestCase {
   XCTAssertEqual(BackupFailure.sourceChanged.diagnosticCode,"SOURCE_CHANGED")
  }
 }
+
+final class CapacityResponseTests:XCTestCase {
+ func testQuotaResponseIsSpecificAndNeverTreatsOtherConflictsAsStorageFull(){let quota=Data("{\"code\":\"CLOUD_QUOTA_EXCEEDED\"}".utf8);XCTAssertEqual(BackupFailure.responseFailure(status:409,body:quota),.cloudQuota);XCTAssertEqual(BackupFailure.responseFailure(status:503,body:quota),.http(503));XCTAssertEqual(BackupFailure.responseFailure(status:409,body:Data("{}".utf8)),.http(409));XCTAssertEqual(BackupFailure.responseFailure(status:409,body:Data(repeating:0,count:4097)),.http(409))}
+}

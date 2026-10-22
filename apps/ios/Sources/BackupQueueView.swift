@@ -29,6 +29,8 @@ private func backupGuidance(_ item:BackupItem)->String? {
  if item.lastErrorCode == "SESSION_EXPIRED" { return "Sign in again from Account, then retry this backup." }
  if item.lastErrorCode == "HTTP_503" { return "Acloud is temporarily unavailable. Keep your original and retry later." }
  if item.lastErrorCode == "HTTP_403" { return "This backup request was not allowed. Check your account access or contact support." }
+ if item.lastErrorCode == "CLOUD_QUOTA_REQUIRED" {return "Your Acloud storage is full for this backup. Review Storage and pending transfers, then resume. Freeing space on this iPad does not increase your Acloud allowance."}
+ if item.lastErrorCode == "DEVICE_SPACE_REQUIRED" {return "This iPad needs more free space to prepare the backup. Free some device space, then resume. Your original stays in Photos."}
  if item.lastErrorCode == "HTTP_409" { return "Acloud could not accept this backup in its current state. Retry once; contact support if it continues." }
  switch item.state {
  case .failedRetryable: return "The backup has not been verified. Keep your original and retry when your connection is available."
@@ -450,6 +452,7 @@ struct BackupQueueView:View {
  @AppStorage("showDeveloperTools") private var showDeveloperTools=false
  @AppStorage("selectedTransferTab") private var selectedAppTab="backup"
  @ObservedObject private var model=BackupQueueModel.shared
+ @ObservedObject private var cloudStorage=StorageScreen.model
  @ObservedObject private var thumbnailSync=AcloudThumbnailSyncStatus.shared
  private enum PickerSelection:String,Identifiable {case photo,video,originals;var id:String{rawValue}}
  @State private var pickerSelection:PickerSelection?
@@ -530,6 +533,10 @@ struct BackupQueueView:View {
      Section {
       Button{pickerSelection = .originals}label:{Label("Choose photos & videos to back up",systemImage:"plus.circle.fill").frame(maxWidth:.infinity)}
        .buttonStyle(.borderedProminent).disabled(!model.canSelectOriginals || model.busy)
+      if let cloud=cloudStorage.cloud {
+       Text("Last reported Acloud space: \(acloudCapacity(cloud.remainingBytes)) available").font(.caption).foregroundStyle(.secondary)
+       if cloud.remainingBytes==0{Text("Your Acloud allowance is full or reserved for pending transfers. Review Storage before starting another backup.").font(.footnote).foregroundStyle(.orange)}
+      }
       if !model.message.isEmpty{Text(model.message).font(.caption).foregroundStyle(.secondary)}
       HStack {
        Text("Choose up to 10 items at a time.").font(.caption).foregroundStyle(.secondary)
@@ -605,6 +612,7 @@ struct BackupQueueView:View {
    .sheet(item:$galleryViewer){presentation in AcloudGalleryViewer(items:presentation.items,startID:presentation.startID)}
    .alert("Backup selection",isPresented:Binding(get:{model.selectionNotice != nil},set:{if !$0{model.selectionNotice=nil}})){Button("OK",role:.cancel){model.selectionNotice=nil}}message:{Text(model.selectionNotice ?? "")}
    .task{await model.refresh()}
+   .task{await StorageScreen.connect()}
  }
  @ViewBuilder private var transferControls:some View {
   if waitingCount>0{Button("Pause all"){Task{await model.pauseAll()}}}

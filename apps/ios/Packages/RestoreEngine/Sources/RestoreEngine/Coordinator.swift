@@ -1,4 +1,5 @@
 import Foundation
+import MediaPreservation
 public actor RestoreCoordinator {
  private let queue:RestoreQueue,files:RestoreFiles,api:any RestoreAPI,downloader:any RestoreDownloader,photos:any PhotoLibraryRestorer,capacity:any DeviceCapacity,concurrency:Int
  private var savingID:UUID?
@@ -17,21 +18,22 @@ public actor RestoreCoordinator {
   let started=Date()
   await api.report("REQUESTED",retry:item.retryCount,durationMs:nil)
   do{
-   if let available=try capacity.available(at:files.directory),available<Int64(item.evidence.expectedSize)*2+64*1024*1024{item.state = .paused;item.lastErrorCode="DEVICE_SPACE_REQUIRED";_=try await queue.save(item);return}
+   if !StorageSpace.permits(available:try capacity.available(at:files.directory),required:StorageSpace.required(bytes:Int64(item.evidence.expectedSize),copies:item.state == .ready ? 1:2)){item.state = .paused;item.lastErrorCode="DEVICE_SPACE_REQUIRED";_=try await queue.save(item);return}
    if item.state != .ready{
-    item=try await transition(id,.authorizing);let authorization=try await api.authorize(item.evidence);try bound(item);guard authorization.evidence == item.evidence else{throw RestoreFailure.versionChanged};item=try await transition(id,.downloading);try files.remove(id,includingPartial:false)
-    try await downloader.download(authorization.authorization,to:files.url(id),expectedSize:item.evidence.expectedSize,progress:{[weak self] count in Task{await self?.progress(id,count)}})
+    item=try await transition(id,.authorizing);let authorization=try await api.authorize(item.evidence);try bound(item);guard authorization.evidence == item.evidence else{throw RestoreFailure.versionChanged};item=try await transition(id,.downloading);if (try? files.verify(item)) == nil {try files.remove(id,includingPartial:false)
+    try await downloader.download(authorization.authorization,to:files.url(id),expectedSize:item.evidence.expectedSize,progress:{[weak self] count in Task{await self?.progress(id,count)}})}
     await api.report("DOWNLOAD_OK",retry:item.retryCount,durationMs:Int(Date().timeIntervalSince(started)*1000))
     item=try await transition(id,.verifying);try files.verify(item);item=try await current(id);item.bytesDownloaded=item.evidence.expectedSize;item.state = .ready;item=try await queue.save(item)
    }
-   try files.verify(item);if let available=try capacity.available(at:files.directory),available<Int64(item.evidence.expectedSize)+64*1024*1024{throw RestoreFailure.storage};while savingID != nil{try bound(item);try await Task.sleep(for:.milliseconds(20))};savingID=id;defer{if savingID==id{savingID=nil}};guard await photos.canSave() else{throw RestoreFailure.permission};try await photos.validate(files.url(id),mediaType:item.evidence.mediaType);let evidence=try await api.recheck(item.evidence);item=try await current(id);guard item.state == .ready,evidence == item.evidence else{throw RestoreFailure.versionChanged};try bound(item)
+   try files.verify(item);if let available=try capacity.available(at:files.directory),available<StorageSpace.required(bytes:Int64(item.evidence.expectedSize),copies:1){throw RestoreFailure.deviceSpace};while savingID != nil{try bound(item);try await Task.sleep(for:.milliseconds(20))};savingID=id;defer{if savingID==id{savingID=nil}};guard await photos.canSave() else{throw RestoreFailure.permission};try await photos.validate(files.url(id),mediaType:item.evidence.mediaType);let evidence=try await api.recheck(item.evidence);item=try await current(id);guard item.state == .ready,evidence == item.evidence else{throw RestoreFailure.versionChanged};try bound(item)
    item.state = .saving;item=try await queue.save(item);try bound(item)
    // Once submitted, Apple creation is not cancellable. Account changes wait for this callback.
    let identifier=try await photos.save(files.url(id),mediaType:item.evidence.mediaType)
    guard var saved=try await queue.read(id),saved.accountID == item.accountID,saved.evidence == item.evidence else{throw RestoreFailure.ambiguousSave};saved.localIdentifier=identifier;saved=try await queue.save(saved);_=try await queue.completed(saved,localIdentifier:identifier);if account==saved.accountID{await api.report("COMPLETED",retry:saved.retryCount,durationMs:Int(Date().timeIntervalSince(started)*1000))};do{try files.remove(id)}catch{await api.report("CLEANUP_FAILED",retry:saved.retryCount,durationMs:nil);throw error}
   }catch{
    guard var latest=try await queue.read(id),![.restored,.cancelled].contains(latest.state) else{throw error}
-   if latest.state == .ready,Self.retryable(error),latest.retryCount<8{latest.retryCount+=1;latest.nextRetryAt=Date().addingTimeInterval(min(3600,pow(2,Double(latest.retryCount))))}
+   if latest.state != .saving,(error as? RestoreFailure == .deviceSpace || StorageSpace.isFull(error)){latest.state = .paused;latest.lastErrorCode="DEVICE_SPACE_REQUIRED";latest.nextRetryAt=nil}
+   else if latest.state == .ready,Self.retryable(error),latest.retryCount<8{latest.retryCount+=1;latest.nextRetryAt=Date().addingTimeInterval(min(3600,pow(2,Double(latest.retryCount))))}
    else if latest.state == .saving{latest.state = .reconcile;latest.lastErrorCode="SAVE_RESULT_UNCERTAIN";if case let RestoreFailure.photosSave(code)=error{latest.lastErrorCode="PHOTOS_SAVE_ERROR_\(code)"}}
    else if latest.state == .paused{}else if error is CancellationError || account==nil{latest.state = .paused;latest.lastErrorCode="USER_PAUSED"}
    else if error as? RestoreFailure == .permission{latest.state = .paused;latest.lastErrorCode="PHOTOS_PERMISSION_REQUIRED"}

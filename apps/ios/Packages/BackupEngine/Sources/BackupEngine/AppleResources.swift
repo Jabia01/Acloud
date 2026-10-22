@@ -10,7 +10,7 @@ public struct PhotoKitOriginalSource:OriginalResourceSource {
   let snapshot=try await describe(id);guard snapshot.supported,resources.count==1,let resource=resources.first else{throw BackupFailure.unsupported}
   let options=PHAssetResourceRequestOptions();options.isNetworkAccessAllowed=allowNetwork;options.progressHandler={value in progress(min(1,max(0,value)))}
   let writer=try PhotoResourceWriter(url:url)
-  do{try await withTaskCancellationHandler(operation:{try await writer.write(resource,options:options)},onCancel:{writer.cancel()});progress(1)}catch{let e=error as NSError;if e.domain==PHPhotosErrorDomain&&e.code==PHPhotosError.Code.networkAccessRequired.rawValue{throw BackupFailure.waitingForOriginal};if error is CancellationError{throw CancellationError()};throw BackupFailure.inaccessible}
+  do{try await withTaskCancellationHandler(operation:{try await writer.write(resource,options:options)},onCancel:{writer.cancel()});progress(1)}catch{let e=error as NSError;if e.domain==PHPhotosErrorDomain&&e.code==PHPhotosError.Code.networkAccessRequired.rawValue{throw BackupFailure.waitingForOriginal};if error is CancellationError{throw CancellationError()};if StorageSpace.isFull(error){throw BackupFailure.deviceSpace};throw BackupFailure.inaccessible}
  }
 }
 #if DEBUG

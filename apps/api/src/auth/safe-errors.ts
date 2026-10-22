@@ -23,6 +23,10 @@ export class SafeErrors implements ExceptionFilter {
     const message = oversized?'Request too large':error instanceof HttpException && status < 500 ? error.message : 'Service unavailable';
     response.setHeader('Cache-Control', 'no-store');
     if (status === 429) response.setHeader('Retry-After', '600');
-    response.status(status).json({ message });
+    const detail=error instanceof HttpException?error.getResponse():null;
+    const quota=status===409&&detail&&typeof detail==='object'&&'code' in detail&&detail.code==='CLOUD_QUOTA_EXCEEDED'?detail as Record<string,unknown>:null;
+    const fields:Record<string,unknown>={message};
+    if(quota){fields.code='CLOUD_QUOTA_EXCEEDED';for(const key of ['requiredBytes','availableBytes'])if(Number.isSafeInteger(quota[key])&&Number(quota[key])>=0)fields[key]=quota[key];}
+    response.status(status).json(fields);
   }
 }
